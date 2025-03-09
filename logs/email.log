@@ -1,0 +1,1 @@
+2025-02-26 14:25:16,046 - ERROR - ❌ Failed to send email: (535, b'5.7.8 Username and Password not accepted. For more information, go to\n5.7.8  https://support.google.com/mail/?p=BadCredentials a640c23a62f3a-abed204f677sm320218666b.126 - gsmtp')

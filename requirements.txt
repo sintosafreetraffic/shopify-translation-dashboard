@@ -1,0 +1,7 @@
+Flask
+requests
+openai
+deep-translator
+gspread
+oauth2client
+python-dotenv
