@@ -1,14 +1,27 @@
 import os
 import sys
+
+sys.path.append(os.path.abspath(os.path.dirname(__file__)))  # Ensure current directory is in path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))  # Add parent directory
+
+print("PYTHONPATH:", sys.path)  # Debugging output
+
 import sqlite3
 import requests
+import json
 import logging
 import re  # For simple HTML pattern matching
+from translation import chatgpt_translate, google_translate, deepl_translate
 from flask import Flask, render_template, request, jsonify
 from dotenv import load_dotenv
+from variants_utils import get_product_option_values, update_product_option_values
+
+
 
 # If your modules are located one directory up
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+load_dotenv()
 
 # Custom modules
 from shopify_api import fetch_product_by_id, fetch_products_by_collection, update_product_translation
@@ -18,14 +31,17 @@ from google_sheets import process_google_sheet
 # ------------------------------ #
 # Load Environment Variables
 # ------------------------------ #
-load_dotenv()  # Loads from .env
 
-SHOPIFY_STORE_URL = os.getenv("SHOPIFY_STORE_URL")
+DEEPL_API_KEY = os.getenv("DEEPL_API_KEY")
+GOOGLE_TRANSLATE_API_KEY = os.getenv("GOOGLE_TRANSLATE_API_KEY")  # If needed for advanced Google Translate API
+CHATGPT_API_KEY = os.getenv("CHATGPT_API_KEY")
+SHOPIFY_API_URL = os.getenv("SHOPIFY_API_URL")  # Shopify store URL
 SHOPIFY_API_KEY = os.getenv("SHOPIFY_API_KEY")
+SHOPIFY_STORE_URL=os.getenv("SHOPIFY_STORE_URL")
 
 if not SHOPIFY_STORE_URL or not SHOPIFY_API_KEY:
     raise ValueError("Missing Shopify credentials! Please set SHOPIFY_STORE_URL and SHOPIFY_API_KEY.")
-
+    
 # ------------------------------ #
 # Logging Configuration
 # ------------------------------ #
@@ -271,12 +287,13 @@ def get_collections():
     result = [{"id": c["id"], "title": c["title"]} for c in all_collections]
     return jsonify({"collections": result})
 
+
 # --- Fetch Products by Collection ---
 @app.route("/fetch_products_by_collection", methods=["POST"])
 def fetch_products_by_collection():
     """
     Fetch product details (without variants) from Shopify based on the selected collection.
-    Returns collection name, product count, and product list.
+    Returns collection name, product count, product list, and Shopify GIDs.
     """
     try:
         data = request.json
@@ -284,7 +301,7 @@ def fetch_products_by_collection():
         if not collection_id:
             return jsonify({"error": "No collection selected"}), 400
 
-        # We fetch "images" too, in case we want them for post-processing
+        # Fetch products from Shopify API
         url = (
             f"https://{SHOPIFY_STORE_URL}/admin/api/2023-04/products.json"
             f"?collection_id={collection_id}&fields=id,title,body_html,image,images"
@@ -297,15 +314,25 @@ def fetch_products_by_collection():
         if not products:
             return jsonify({"error": "No products found in this collection."}), 404
 
+        # Convert product IDs to Shopify Global IDs (GIDs)
+        product_data = []
+        for product in products:
+            product_gid = f"gid://shopify/Product/{product['id']}"
+            product["gid"] = product_gid  # Add GID to product data
+            product_data.append(product)
+
         return jsonify({
             "success": True,
             "collection_name": data.get("collection_name", "Unknown Collection"),
             "product_count": len(products),
-            "products": products
+            "products": product_data,  # Now includes Shopify GIDs
+            "product_gids": [p["gid"] for p in products]  # Separate GID list
         })
+
     except Exception as e:
         logger.exception(e)
         return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
+
 
 # --- Fetch Variants ---
 @app.route("/fetch_variants", methods=["POST"])
@@ -382,7 +409,6 @@ def clean_title_output(title):
     """
     return title.strip().strip('"').strip("'")
 
-
 # --- Translate Single Product ---
 @app.route("/translate_test_product", methods=["POST"])
 def translate_test_product():
@@ -404,9 +430,13 @@ def translate_test_product():
 
         source_lang = data.get("source_language", "auto")
         target_lang = data.get("target_language", "de")
+        logger.info(f"Received target_language: '{target_lang}' for translation.")
 
         if not product_id:
             return jsonify({"error": "No product ID provided"}), 400
+
+        logger.info(f"🌍 Target language received: '{target_lang}' for product ID: '{product_id}'")
+        logger.info(f"🛠️ Fields to translate: {fields}")
 
         url_get = (
             f"https://{SHOPIFY_STORE_URL}/admin/api/2023-04/products/{product_id}.json"
@@ -480,10 +510,6 @@ def translate_test_product():
 
             updated_data["title"] = title  # Store cleaned title
 
-
-
-
-
         # --- DESCRIPTION (body_html) ---
         if "body_html" in fields:
             chosen_method = methods.get("body_html", "google")
@@ -509,6 +535,7 @@ def translate_test_product():
 
         # --- TAGS ---
         if "tags" in fields:
+            logging.info("🚀 Translating product tags...")
             chosen_method = methods.get("tags", "google")
             original_tags = product_data.get("tags", "")
             new_tags = apply_translation_method(
@@ -520,8 +547,9 @@ def translate_test_product():
             )
             updated_data["tags"] = new_tags
 
-        # --- HANDLE ---
+        # --- HANDLE (SLUG) ---
         if "handle" in fields:
+            logging.info("🚀 Translating product handle...")
             chosen_method = methods.get("handle", "google")
             original_handle = product_data.get("handle", "")
             new_handle = apply_translation_method(
@@ -533,30 +561,55 @@ def translate_test_product():
             )
             updated_data["handle"] = slugify(new_handle)
 
-        # --- VARIANT OPTIONS ---
+       # --- VARIANT OPTIONS (✅ Fix: Capture Translated Variants) ---
         if "variant_options" in fields:
-            chosen_method = methods.get("variant_options", "google")
-            new_options = []
-            for opt in product_data.get("options", []):
-                translated_name = apply_translation_method(
-                    original_text=opt.get("name", ""),
-                    method=chosen_method,
-                    custom_prompt=prompt_variants,
-                    source_lang=source_lang,
-                    target_lang=target_lang
+            logging.info("🚀 Translating variant options for product...")
+
+            # Fetch product options
+            product_gid = f"gid://shopify/Product/{product_id}"  # ←✅ This fixes your error
+            options = get_product_option_values(product_gid)
+
+            translated_variant_options = []
+
+            if options:
+                for option in options:
+                    translation_method = data.get("translation_method")
+
+                    # ✅ Ensure a default translation method (if missing)
+                    if not translation_method or not isinstance(translation_method, str):
+                        logging.warning("⚠️ No translation method provided! Falling back to user default.")
+                        translation_method = "google"  # Default to ChatGPT (Change if needed)
+
+                    translation_method = translation_method.strip().lower()
+
+                    # ✅ Allowed methods
+                    VALID_METHODS = {"deepl", "chatgpt", "google"}
+
+                    if translation_method not in VALID_METHODS:
+                        logging.error(f"❌ Invalid translation method! Received: '{translation_method}'")
+                        return jsonify({"error": "Invalid translation method. Please select Deepl, ChatGPT, or Google."}), 400
+
+
+                    update_product_option_values(
+                    product_gid,
+                    option,
+                    target_lang,
+                    source_language=source_lang,  # ✅ Ensure it's passed as a keyword argument
+                    translation_method=translation_method  # ✅ Also pass translation method correctly
                 )
-                opt["name"] = translated_name
-                new_options.append(opt)
-            updated_data["options"] = new_options
 
-        if not updated_data:
-            return jsonify({"error": "No fields selected or no translations applied."}), 400
 
-        url_put = f"https://{SHOPIFY_STORE_URL}/admin/api/2023-04/products/{product_id}.json"
-        put_payload = {"product": {"id": product_id, **updated_data}}
-        update_resp = shopify_request("PUT", url_put, json=put_payload)
-        if update_resp.status_code not in (200, 201):
-            return jsonify({"error": "Failed to update product", "details": update_resp.text}), 500
+
+                    translated_variant_options.append({
+                        "id": option["id"],
+                        "name": option["name"],
+                        "translated_values": [val["name"] for val in option["optionValues"]]
+                    })
+
+            # Store in updated_data to include in the response
+            updated_data["translated_options"] = translated_variant_options if translated_variant_options else []
+
+        logging.info("✅ Translation process complete!")
 
         return jsonify({
             "success": True,
@@ -565,14 +618,13 @@ def translate_test_product():
             "translated_description": updated_data.get("body_html", ""),
             "translated_tags": updated_data.get("tags", ""),
             "translated_handle": updated_data.get("handle", ""),
-            "translated_options": updated_data.get("options", []),
+            "translated_options": updated_data.get("translated_options", []),  # ✅ Ensure it's returned
         })
+
 
     except Exception as e:
         logger.exception(e)
         return jsonify({"error": str(e)}), 500
-
-
 
 # --- Translate Entire Collection (ChatGPT example) ---
 @app.route("/translate_collection_fields", methods=["POST"])
@@ -684,29 +736,46 @@ def translate_selected_fields():
 @app.route("/start_translation", methods=["POST"])
 def start_translation():
     """
-    Start the bulk translation process for multiple variants.
+    Start the bulk translation process for multiple variants and product IDs.
     Updates the local database with status='Pending Approval'.
-    Here we only do chatgpt_translate, but you could adapt.
+    Supports ChatGPT translation.
     """
     data = request.json
+    product_ids = data.get("product_ids", [])
     variants = data.get("variants", [])
+    target_language = data.get("target_language", "fr")
     prompt = data.get("prompt", "")
 
-    if not variants:
-        return jsonify({"error": "No variants selected"}), 400
+    if not product_ids and not variants:
+        return jsonify({"error": "No products or variants selected"}), 400
 
-    with sqlite3.connect(DATABASE) as conn:
-        cursor = conn.cursor()
-        for variant_id in variants:
-            translated_text = chatgpt_translate(prompt)
-            cursor.execute("""
-                UPDATE translations 
-                SET translated_description=?, status='Pending Approval' 
-                WHERE product_id=?
-            """, (translated_text, variant_id))
-        conn.commit()
+    try:
+        success_message = []
 
-    return jsonify({"success": True, "message": "Translation started successfully!"})
+        if product_ids:
+            success, message = process_all_products(product_ids, target_language)
+            if success:
+                success_message.append(message)
+            else:
+                return jsonify({"error": message}), 500
+
+        if variants:
+            with sqlite3.connect(DATABASE) as conn:
+                cursor = conn.cursor()
+                for variant_id in variants:
+                    translated_text = chatgpt_translate(prompt)
+                    cursor.execute("""
+                        UPDATE translations 
+                        SET translated_description=?, status='Pending Approval' 
+                        WHERE product_id=?
+                    """, (translated_text, variant_id))
+                conn.commit()
+            success_message.append(f"Translation started for {len(variants)} variants!")
+
+        return jsonify({"success": True, "message": " ".join(success_message)})
+    except Exception as e:
+        logger.exception(e)
+        return jsonify({"error": str(e)}), 500
 
 # --- Approve Translations ---
 @app.route("/approve_translations", methods=["POST"])
@@ -815,6 +884,28 @@ def optimize_translations():
 def log_translation(product_id, title, description, status):
     """Optional: Log translation events (prints to console)."""
     logger.info(f"Translation log - Product ID: {product_id}, Status: {status}")
+
+@app.route("/upload_google_sheet_text", methods=["POST"])
+def upload_google_sheet_text():
+    if "file" not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+
+    file = request.files["file"]
+    image_column = request.form.get("image_column", "A")
+    starting_row = int(request.form.get("starting_row", 2))
+    convert_str = request.form.get("convert_to_text", "false").lower()
+    convert_bool = (convert_str == "true")
+
+    result = process_google_sheet(
+        file=file,
+        image_column=image_column,
+        starting_row=starting_row,
+        pre_process=True,
+        convert_to_text=convert_bool
+    )
+    return jsonify(result)
+
+
 
 # ------------------------------ #
 # Main Entry Point

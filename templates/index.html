@@ -47,7 +47,7 @@
 </head>
 <body>
 <div class="container mt-4">
-  <h1>Shopify Translation !Dashboard!</h1>
+  <h1>Shopify Translation !Dashboard!?</h1>
   <p>
     Translate your Shopify products using Google, DeepL, or ChatGPT.
     Optionally preserve HTML formatting and insert images with ChatGPT.
@@ -79,15 +79,30 @@
     </div>
   </div>
 
+
   <!-- B) LOAD COLLECTION -->
   <div class="card p-3 mb-3">
     <h4>Load by Collection</h4>
+    <div id="collectionLoading" class="text-muted">Fetching collections...</div>
     <select id="collectionDropdown" class="form-select mb-2">
       <option value="" disabled selected>Loading collections…</option>
     </select>
-    <button class="btn btn-primary" onclick="fetchProductsByCollection()">Load Products</button>
+    <button class="btn btn-primary" id="fetchProductsByCollection">Load Products</button>
     <div id="collectionInfo" class="mt-2"></div>
+    <div id="productLoading" class="text-muted" style="display:none;">Loading products...</div>
   </div>
+
+  <style>
+   #collectionDropdown {
+  width: auto; /* Let it expand naturally */
+  min-width: 250px; /* Adjust as needed */
+  max-width: 400px; /* Prevent too wide expansion */
+  white-space: normal; /* Allow text to wrap */
+  word-wrap: break-word; /* Ensure wrapping */
+  overflow: visible; /* Ensure content is not hidden */
+}
+  </style>
+  
 
   <!-- C) GOOGLE SHEET UPLOAD -->
   <div class="card p-3 mb-3">
@@ -302,9 +317,11 @@ function insertPrompt(text) {
 
 /** (1) Fetch all collections from backend */
 function fetchCollections() {
-  fetch("/get_collections")
-    .then(r => r.json())
+  console.log("🔍 Fetching collections...");
+  fetch("http://127.0.0.1:5003/get_collections")
+    .then(response => response.json())
     .then(data => {
+      console.log("✅ Collections received:", data);
       const dd = document.getElementById("collectionDropdown");
       dd.innerHTML = "";
       if (data.collections && data.collections.length > 0) {
@@ -313,43 +330,108 @@ function fetchCollections() {
           let opt = document.createElement("option");
           opt.value = col.id;
           opt.textContent = col.title;
+          opt.title = col.title; // Shows full text on hover
           dd.appendChild(opt);
         });
       } else {
+        console.warn("⚠️ No collections found.");
         dd.innerHTML = "<option>No collections found</option>";
       }
     })
-    .catch(err => console.error("Error fetching collections:", err));
+    .catch(error => {
+      console.error("❌ Error fetching collections:", error);
+    });
 }
 
-/** (2) Fetch products in chosen collection */
-function fetchProductsByCollection() {
-  const collectionId = document.getElementById("collectionDropdown").value;
-  if (!collectionId) {
-    alert("Please select a collection first.");
-    return;
-  }
-  fetch("/fetch_products_by_collection", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ collection_id: collectionId })
-  })
+function translateVariants() {
+    const collectionId = document.getElementById("collectionDropdown").value;
+    const targetLang = document.getElementById("targetLanguageDropdown").value;
+    const sourceLang = document.getElementById("sourceLanguageDropdown").value; // This could be "auto" or explicit
+
+    fetch("/translate_collection_variants", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+            collection_id: collectionId,
+            target_language: targetLang,
+            source_language: sourceLang
+        })
+    })
     .then(r => r.json())
     .then(data => {
-      if (data.success && data.products && data.products.length > 0) {
-        window.allLoadedProducts = data.products;
-        displayTestProduct(data.products[0]);
-        document.getElementById("singleProductCard").style.display = "block";
-        document.getElementById("fieldsCard").style.display = "block";
-
-        document.getElementById("collectionInfo").innerText =
-          `Loaded ${data.product_count} products from "${data.collection_name}".`;
-      } else {
-        alert(data.error || "No products found in this collection.");
-      }
+        console.log("✅ Translation response:", data);
     })
-    .catch(err => console.error("Error fetching products:", err));
+    .catch(err => console.error("❌ Translation error:", err));
 }
+
+
+/** (2) Fetch products in chosen collection */
+/** (2) Fetch products in chosen collection and their variant options */
+function fetchProductsByCollection() {
+    const collectionId = document.getElementById("collectionDropdown").value;
+    const collectionName = document.getElementById("collectionDropdown").options[document.getElementById("collectionDropdown").selectedIndex].text;
+
+    if (!collectionId) {
+        alert("Please select a collection first.");
+        return;
+    }
+
+    document.getElementById("productLoading").style.display = "block";
+    document.getElementById("collectionInfo").innerText = "Fetching products...";
+
+    fetch("/fetch_products_by_collection", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ collection_id: collectionId, collection_name: collectionName })
+    })
+    .then(r => r.json())
+    .then(data => {
+        document.getElementById("productLoading").style.display = "none";
+
+        if (data.success && data.products && data.products.length > 0) {
+            window.allLoadedProducts = data.products;
+            const productGIDs = data.products.map(product => product.id); // ✅ Fetch Product GIDs dynamically
+
+            displayTestProduct(data.products[0]); 
+            document.getElementById("singleProductCard").style.display = "block";
+            document.getElementById("fieldsCard").style.display = "block";
+
+            document.getElementById("collectionInfo").innerText =
+                `✅ Loaded ${data.product_count} products from "${data.collection_name}".`;
+
+            console.log("✅ Product GIDs fetched:", productGIDs);
+
+            // ✅ New: Fetch variant options immediately after loading products
+            fetch("/fetch_variant_options", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({ product_gids: productGIDs })
+            })
+            .then(r => r.json())
+            .then(variantData => {
+                if (variantData.success) {
+                    window.productVariantOptions = variantData.options;
+                    console.log("✅ Loaded product variant options:", window.productVariantOptions);
+                } else {
+                    console.error("⚠️ No variant options found:", variantData.error);
+                }
+            })
+            .catch(err => {
+                console.error("❌ Error fetching variant options:", err);
+            });
+
+        } else {
+            alert("⚠️ No products found in this collection.");
+            document.getElementById("collectionInfo").innerText = "No products found.";
+        }
+    })
+    .catch(err => {
+        console.error("❌ Error fetching products:", err);
+        document.getElementById("productLoading").style.display = "none";
+        document.getElementById("collectionInfo").innerText = "❌ Error loading products.";
+    });
+}
+
 
 /** (3) Upload Google Sheet */
 function uploadGoogleSheet() {
@@ -448,8 +530,15 @@ function gatherFieldSelections() {
   }
   // Variant Options
   if (fields.includes("variant_options")) {
-    methods.variant_options = document.querySelector('input[name="variant_optionsMethod"]:checked')?.value || "google";
+    const selectedMethod = document.querySelector('input[name="variant_optionsMethod"]:checked');
+    if (selectedMethod) {
+      methods.variant_options = selectedMethod.value;
+    } else {
+      console.warn("⚠️ No translation method selected for variant options! Defaulting to Google.");
+      methods.variant_options = "google";  // ✅ Fallback
+    }
   }
+
 
   // ChatGPT prompts, if user actually picked "chatgpt" for that field
   let chatgptPromptTitle = "";
@@ -556,72 +645,93 @@ function displayTestRunResult(data) {
 
 /** (8) Bulk translation on all loaded products */
 function runAllProducts() {
-  if (!window.allLoadedProducts || window.allLoadedProducts.length === 0) {
-    alert("No products loaded for bulk run.");
-    return;
-  }
-  const { fields, methods, prompts } = gatherFieldSelections();
-  const sourceLang = document.getElementById("sourceLanguage").value;
-  const targetLang = document.getElementById("targetLanguage").value;
-
-  const products = window.allLoadedProducts;
-  const total = products.length;
-  let completed = 0;
-
-  document.getElementById("bulkProgressBarContainer").style.display = "block";
-  updateProgress(0);
-
-  function translateNext(i) {
-    if (i >= total) {
-      alert("All products translated successfully!");
-      return;
+    if (!window.allLoadedProducts || window.allLoadedProducts.length === 0) {
+        alert("No products loaded for bulk run.");
+        return;
     }
-    const product = products[i];
-    fetch("/translate_test_product", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        product_id: product.id,
-        fields,
-        field_methods: methods,
-        prompt_title: prompts.prompt_title,
-        prompt_desc: prompts.prompt_desc,
-        prompt_tags: prompts.prompt_tags,
-        prompt_handle: prompts.prompt_handle,
-        prompt_variants: prompts.prompt_variants,
-        source_language: sourceLang,
-        target_language: targetLang
-      })
-    })
-      .then(r => r.json())
-      .then(() => {
-        completed++;
-        const percent = Math.round((completed / total) * 100);
-        updateProgress(percent);
-        translateNext(i + 1);
-      })
-      .catch(err => {
-        console.error("Error translating product:", product.id, err);
-        completed++;
-        const percent = Math.round((completed / total) * 100);
-        updateProgress(percent);
-        translateNext(i + 1);
-      });
-  }
-  translateNext(0);
+    const { fields, methods, prompts } = gatherFieldSelections();
+    const sourceLang = document.getElementById("sourceLanguage").value;
+    const targetLang = document.getElementById("targetLanguage").value;
+
+    const products = window.allLoadedProducts;
+    const total = products.length;
+    let completed = 0;
+
+    document.getElementById("bulkProgressBarContainer").style.display = "block";
+    updateProgress(0);
+
+    function translateNext(i) {
+        if (i >= total) {
+            alert(`✅ All ${total} products successfully translated!`);
+            return;
+        }
+        const product = products[i];
+
+        fetch("/translate_test_product", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                product_id: product.id,
+                fields,
+                field_methods: methods,
+                prompt_title: prompts.prompt_title,
+                prompt_desc: prompts.prompt_desc,
+                prompt_tags: prompts.prompt_tags,
+                prompt_handle: prompts.prompt_handle,
+                prompt_variants: prompts.prompt_variants,
+                source_language: sourceLang,
+                target_language: targetLang
+            })
+        })
+        .then(r => r.json())
+        .then(() => {
+            completed++;
+            const percent = Math.round((completed / total) * 100);
+            updateProgress(percent);
+            translateNext(i + 1);
+        })
+        .catch(err => {
+            console.error("Error translating product:", product.id, err);
+            completed++;
+            const percent = Math.round((completed / total) * 100);
+            updateProgress(percent);
+            translateNext(i + 1);
+        });
+    }
+    translateNext(0);
 }
 
 /** Update the progress bar */
+/** ✅ Single function to update the progress bar properly */
 function updateProgress(percent) {
-  const bar = document.getElementById("bulkProgressBar");
-  bar.style.width = percent + "%";
-  bar.textContent = percent + "%";
+    const progressBar = document.getElementById("bulkProgressBar");
+    const progressContainer = document.getElementById("bulkProgressBarContainer");
+
+    if (percent === 0) {
+        progressContainer.style.display = "block"; // Show progress bar at start
+    }
+    
+    progressBar.style.width = percent + "%";
+    progressBar.textContent = percent + "%";
+
+    if (percent === 100) {
+        setTimeout(() => {
+            progressContainer.style.display = "none"; // Hide when complete
+        }, 2000);
+    }
 }
+
 
 /** Helper: capitalize first letter */
 function capitalize(str) {
   return str.charAt(0).toUpperCase() + str.slice(1);
 }
+
+document.addEventListener("DOMContentLoaded", function () {
+    document.getElementById("fetchProductsByCollection")?.addEventListener("click", fetchProductsByCollection);
+});
+
+
 </script>
 </body>
 </html>

@@ -22,24 +22,30 @@ client = openai.OpenAI(api_key=OPENAI_API_KEY)
 # ---------------------------------- #
 # GOOGLE TRANSLATE
 # ---------------------------------- #
+from deep_translator import GoogleTranslator
+
 def google_translate(
     text: str,
     source_language: str = "auto",  # "auto" => Google attempts detection
-    target_language: str = "de"     # e.g. "en", "de", "fr", "es", ...
+    target_language: str = "de"     # e.g., "en", "de", "fr", "es", etc.
 ) -> str:
     """
     Translate text using Google (deep_translator).
-    
+
     Args:
         text (str): The text to translate.
-        source_language (str): The source language code (e.g. "en") or "auto".
-        target_language (str): The target language code (e.g. "de" for German).
-    
+        source_language (str): The source language code (e.g., "en") or "auto".
+        target_language (str): The target language code (e.g., "de" for German).
+
     Returns:
         str: The translated text if successful, otherwise the original text.
     """
     if not text.strip():
-        return text  # Empty or whitespace-only
+        return text  # Handle empty input safely
+
+    # Ensure language codes are lowercase to avoid errors
+    source_language = source_language.lower()
+    target_language = target_language.lower()
 
     try:
         translator = GoogleTranslator(
@@ -49,7 +55,8 @@ def google_translate(
         return translator.translate(text)
     except Exception as e:
         print(f"[google_translate] Error: {e}")
-        return text  # Fallback
+        return text  # Fallback to original text in case of error
+
 
 
 def language_code_to_descriptive(lang_code: str) -> str:
@@ -164,7 +171,7 @@ def deepl_translate(
         "auth_key": DEEPL_API_KEY,
         "text": text,
         "target_lang": target_language.upper()
-    }
+    } 
     if source_language:
         params["source_lang"] = source_language.upper()
 
