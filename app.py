@@ -13,6 +13,7 @@ import logging
 import re  # For simple HTML pattern matching
 from translation import chatgpt_translate, google_translate, deepl_translate
 from flask import Flask, render_template, request, jsonify
+from flask_cors import CORS
 from dotenv import load_dotenv
 from variants_utils import get_product_option_values, update_product_option_values
 
@@ -52,6 +53,7 @@ logger = logging.getLogger(__name__)
 # Initialize Flask App
 # ------------------------------ #
 app = Flask(__name__, template_folder="templates")
+CORS(app)  
 
 # ------------------------------ #
 # Database Setup
