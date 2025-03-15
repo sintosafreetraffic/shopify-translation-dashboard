@@ -13,6 +13,7 @@ import logging
 import re  # For simple HTML pattern matching
 from translation import chatgpt_translate, google_translate, deepl_translate
 from flask import Flask, render_template, request, jsonify
+from flask_cors import CORS
 from dotenv import load_dotenv
 from variants_utils import get_product_option_values, update_product_option_values
 
@@ -52,6 +53,7 @@ logger = logging.getLogger(__name__)
 # Initialize Flask App
 # ------------------------------ #
 app = Flask(__name__, template_folder="templates")
+CORS(app)  
 
 # ------------------------------ #
 # Database Setup
@@ -296,12 +298,8 @@ def fetch_products_by_collection():
     Returns collection name, product count, product list, and Shopify GIDs.
     """
     try:
-        logger.info(f"🛠 [DEBUG] Raw Request Data: {request.data}")  # Raw payload
-        logger.info(f"🛠 [DEBUG] Headers: {dict(request.headers)}")  # Headers
-        logger.info(f"🛠 [DEBUG] Content-Type: {request.content_type}")  # Ensure it's JSON
         data = request.json
         collection_id = data.get("collection_id")
-        logger.info(f"✅ [DEBUG] Parsed JSON Payload: {json.dumps(data, indent=2)}")  # Log parsed JSON
         if not collection_id:
             return jsonify({"error": "No collection selected"}), 400
 
@@ -310,7 +308,6 @@ def fetch_products_by_collection():
             f"https://{SHOPIFY_STORE_URL}/admin/api/2023-04/products.json"
             f"?collection_id={collection_id}&fields=id,title,body_html,image,images"
         )
-        logger.info(f"📡 [DEBUG] Fetching Shopify products from: {url}")
         resp = shopify_request("GET", url)
         if resp.status_code != 200:
             return jsonify({"error": "Failed to fetch products from Shopify."}), 500
@@ -325,14 +322,6 @@ def fetch_products_by_collection():
             product_gid = f"gid://shopify/Product/{product['id']}"
             product["gid"] = product_gid  # Add GID to product data
             product_data.append(product)
-        
-        product_gids = data.get("product_gids")
-        if not isinstance(product_gids, list):
-            logger.error(f"❌ [ERROR] Expected list, but got: {type(product_gids)}")
-            return jsonify({"error": "'product_gids' should be a list"}), 400
-
-        logger.info(f"✅ [DEBUG] Products Loaded: {len(products)}")
-        logger.info(f"✅ [DEBUG] Product GIDs: {product_gids}")    
 
         return jsonify({
             "success": True,
@@ -350,59 +339,24 @@ def fetch_products_by_collection():
 # --- Fetch Variants ---
 @app.route("/fetch_variants", methods=["POST"])
 def fetch_variants():
+    """
+    Fetch variants for a given product ID from Shopify.
+    """
     try:
-        # Step 1: Log the incoming request for debugging
-        logger.info(f"🔍 [DEBUG] Raw request data: {request.data}")
-        logger.info(f"🔍 [DEBUG] Headers: {dict(request.headers)}")
-        logger.info(f"🔍 [DEBUG] Content-Type: {request.content_type}")
+        data = request.json
+        product_id = data.get("product_id")
+        if not product_id:
+            return jsonify({"error": "No product ID provided"}), 400
 
-        # Step 2: Parse the incoming JSON payload
-        try:
-            data = request.get_json(force=True)
-            logger.info(f"✅ [DEBUG] Parsed JSON Payload: {json.dumps(data, indent=2)}")
-        except Exception as e:
-            logger.error(f"❌ [ERROR] JSON Parsing Failed: {str(e)}")
-            return jsonify({"error": "Invalid JSON format", "exception": str(e)}), 400
+        url = f"https://{SHOPIFY_STORE_URL}/admin/api/2023-04/products/{product_id}/variants.json"
+        resp = shopify_request("GET", url)
+        if resp.status_code != 200:
+            return jsonify({"error": "Failed to fetch variants from Shopify."}), 500
 
-        # Step 3: Extract product GIDs
-        product_gids = data.get("product_gids")
-        if not product_gids:
-            logger.error("❌ [ERROR] Missing 'product_gids' in request!")
-            return jsonify({"error": "Missing 'product_gids' in request"}), 400
-
-        # Validate that product_gids is a list of strings
-        if not isinstance(product_gids, list) or not all(isinstance(gid, str) for gid in product_gids):
-            logger.error(f"❌ [ERROR] 'product_gids' should be a list of strings: {product_gids}")
-            return jsonify({"error": "'product_gids' should be a list of strings"}), 400
-
-        # Step 4: Fetch variants for each product GID
-        all_variants = []
-        for product_gid in product_gids:
-            logger.info(f"🔄 [DEBUG] Fetching variants for: {product_gid}")
-
-            # Construct the Shopify API URL
-            url = f"https://{SHOPIFY_STORE_URL}/admin/api/2023-04/products/{product_gid}/variants.json"
-            logger.info(f"📡 [DEBUG] Shopify API URL: {url}")
-
-            # Make the API request
-            resp = shopify_request("GET", url)
-
-            # Check for errors in the response
-            if resp.status_code != 200:
-                logger.error(f"❌ [ERROR] Failed to fetch variants for {product_gid} - Status: {resp.status_code}, Response: {resp.text}")
-                continue
-
-            # Extract variants from the response
-            variants = resp.json().get("variants", [])
-            logger.info(f"✅ [DEBUG] Variants Retrieved for {product_gid}: {json.dumps(variants, indent=2)}")
-
-            all_variants.extend(variants)
-
-        # Step 5: Return the fetched variants
-        return jsonify({"success": True, "variants": all_variants})
-
+        variants = resp.json().get("variants", [])
+        return jsonify({"success": True, "product_id": product_id, "variants": variants})
     except Exception as e:
-        logger.exception("❌ [ERROR] Unexpected error in /fetch_variants")
+        logger.exception(e)
         return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
 
 # --- Upload & Process Google Sheet ---
@@ -959,6 +913,5 @@ def upload_google_sheet_text():
 # Main Entry Point
 # ------------------------------ #
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5003))  # ✅ Forces port 5003
-    logger.info(f"🚀 Starting Flask app on port {port}")
-    app.run(debug=True, host="0.0.0.0", port=port)
+    logger.info("Starting Flask app in %s", os.getcwd())
+    app.run(debug=True, port=5003)
