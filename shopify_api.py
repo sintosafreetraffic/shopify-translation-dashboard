@@ -2,6 +2,7 @@ import os
 import re
 import time
 import logging
+import requests
 
 # -------------------------------------------------------------------------
 # Configure Logging (adjust level as needed)
