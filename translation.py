@@ -239,8 +239,8 @@ def chatgpt_translate_title(product_title: str, custom_prompt: str = "", target_
         "- DO NOT add quotation marks, brackets, or any extra formatting characters.\n"
         "- The title must be completely translated into {target_language} — NO mixing of languages.\n"
         "- Keep the exact format: '[Brand or Key Name] | [Product Name]'.\n"
-        "- '[Product Name]' part must be ≤ 5 words, but must remain a complete phrase.\n"
-        "- The final title must be ≤ 25 tokens & ≤ 255 chars, never cut mid-word.\n"
+        "- '[Product Name]' part must be a complete phrase, but keep it under 4 words. \n"
+        "The final title must be under 20 tokens and under 200 characters. Always complete the phrase, never truncate.\n"
         "- If a title is too long, rephrase or summarize naturally.\n"
         "- NEVER return an incomplete response.\n"
         "- Use persuasive, localized language.\n"
@@ -563,7 +563,7 @@ def parse_ai_description(ai_text, language='en'):
         if lines:
             last_line = lines[-1].strip()
             if last_line and last_line.lower().startswith(('cta', 'call to action')):
-                # If the last line has 'CTA' text without colon
+                # If the last line has 'CTA' text without colonpython3 a
                 cta = last_line.split(':', 1)[-1].strip() if ':' in last_line else last_line
             elif last_line and last_line not in title and last_line not in intro and last_line not in " ".join(features):
                 cta = last_line
