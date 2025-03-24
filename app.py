@@ -3,6 +3,8 @@ import sys
 from dotenv import load_dotenv
 import traceback
 from variants_utils import clean_translated_text
+from variants_utils import get_product_option_values, update_product_option_values
+
 load_dotenv()
 
 print("SHOPIFY_STORE_URL:", os.getenv("SHOPIFY_STORE_URL"))
@@ -808,6 +810,7 @@ def translate_test_product():
             new_options = []
 
             for opt in product_data.get("options", []):
+                logging.info(f"🔍 Found Option: {opt.get('name')} with values: {opt.get('values')}")
                 original_option_name = opt.get("name", "")
                 translated_name = apply_translation_method(
                     original_text=original_option_name,
@@ -864,7 +867,11 @@ def translate_test_product():
         for option in updated_data.get("options", []):  
             original_values = product_data["options"][updated_data["options"].index(option)]["values"]
             translated_options_map.update(dict(zip(original_values, option["values"])))  # Map original -> translated
-        
+        logging.info("🗺️ translated_options_map so far:")
+        for k, v in translated_options_map.items():
+            logging.info(f"    {k} → {v}")
+
+
         # Update variants to match translated option values
         translated_variants = []
         for variant in product_data.get("variants", []):
@@ -874,7 +881,10 @@ def translate_test_product():
                 "option2": translated_options_map.get(variant.get("option2"), variant.get("option2")),
                 "option3": translated_options_map.get(variant.get("option3"), variant.get("option3")),
             }
+
             translated_variants.append(translated_variant)
+
+            logging.info("🧪 Translated Variants:\n%s", json.dumps(translated_variants, indent=2))
 
 
 
@@ -996,6 +1006,28 @@ def translate_collection_fields():
 
                 updates[field] = translated
             logger.info(f"✅ Finished translating product {product.get('id')}")
+
+                # ✅ Translate variant options using variants_utils.py logic
+            if "variant_options" in fields_to_translate:
+
+                product_gid = f"gid://shopify/Product/{product['id']}"
+                options = get_product_option_values(product_gid)
+
+                if options:
+                    for opt in options:
+                        success = update_product_option_values(
+                            product_gid=product_gid,
+                            option=opt,
+                            target_language=target_lang,
+                            source_language="auto",
+                            translation_method=field_methods.get("variant_options", "google")
+                        )
+                        if not success:
+                            logger.error(f"❌ Failed to update variant options for product {product['id']}")
+                        else:
+                            logger.info(f"✅ Variant options updated for product {product['id']}")
+
+
             if updates:
                 payload = {"product": {"id": product["id"], **updates}}
                 update_url = f"https://{SHOPIFY_STORE_URL}/admin/api/2023-04/products/{product['id']}.json"

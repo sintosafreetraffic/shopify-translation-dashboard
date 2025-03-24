@@ -10,6 +10,7 @@ import os
 from langdetect import detect
 from deep_translator import GoogleTranslator
 from deep_translator import DeeplTranslator
+import re
 
 logging.basicConfig(level=logging.INFO)
 
@@ -81,66 +82,108 @@ def get_product_option_values(product_gid):
     return data["data"]["product"]["options"]
 
 COLOR_NAME_MAP = {
-    "Black": {"de": "Schwarz", "es": "Negro", "fr": "Noir", "da": "Sort"},
-    "White": {"de": "Weiß", "es": "Blanco", "fr": "Blanc", "da": "Hvid"},
-    "Gray": {"de": "Grau", "es": "Gris", "fr": "Gris", "da": "Grå"},
-    "Dark Gray": {"de": "Dunkelgrau", "es": "Gris oscuro", "fr": "Gris foncé", "da": "Mørkegrå"},
-    "Light Gray": {"de": "Hellgrau", "es": "Gris claro", "fr": "Gris clair", "da": "Lysegrå"},
-    "Beige": {"de": "Beige", "es": "Beige", "fr": "Beige", "da": "Beige"},
-    "Dark Beige": {"de": "Dunkelbeige", "es": "Beige oscuro", "fr": "Beige foncé", "da": "Mørk beige"},
-    "Light Beige": {"de": "Hellbeige", "es": "Beige claro", "fr": "Beige clair", "da": "Lys beige"},
-    "Blue": {"de": "Blau", "es": "Azul", "fr": "Bleu", "da": "Blå"},
-    "Dark Blue": {"de": "Dunkelblau", "es": "Azul oscuro", "fr": "Bleu foncé", "da": "Mørkeblå"},
-    "Light Blue": {"de": "Hellblau", "es": "Azul claro", "fr": "Bleu clair", "da": "Lyseblå"},
-    "Navy Blue": {"de": "Marineblau", "es": "Azul marino", "fr": "Bleu marine", "da": "Marineblå"},
-    "Green": {"de": "Grün", "es": "Verde", "fr": "Vert", "da": "Grøn"},
-    "Dark Green": {"de": "Dunkelgrün", "es": "Verde oscuro", "fr": "Vert foncé", "da": "Mørkegrøn"},
-    "Light Green": {"de": "Hellgrün", "es": "Verde claro", "fr": "Vert clair", "da": "Lysegrøn"},
-    "Olive": {"de": "Oliv", "es": "Oliva", "fr": "Olive", "da": "Oliven"},
-    "Red": {"de": "Rot", "es": "Rojo", "fr": "Rouge", "da": "Rød"},
-    "Pink": {"de": "Rosa", "es": "Rosa", "fr": "Rose", "da": "Lyserød"},
-    "Dark Pink": {"de": "Dunkelrosa", "es": "Rosa oscuro", "fr": "Rose foncé", "da": "Mørk rosa"},
-    "Light Pink": {"de": "Hellrosa", "es": "Rosa claro", "fr": "Rose clair", "da": "Lys pink"},
-    "Yellow": {"de": "Gelb", "es": "Amarillo", "fr": "Jaune", "da": "Gul"},
-    "Dark Yellow": {"de": "Dunkelgelb", "es": "Amarillo oscuro", "fr": "Jaune foncé", "da": "Mørkegul"},
-    "Light Yellow": {"de": "Hellgelb", "es": "Amarillo claro", "fr": "Jaune clair", "da": "Lysegul"},
-    "Mustard Yellow": {"de": "Senfgelb", "es": "Amarillo mostaza", "fr": "Jaune moutarde", "da": "Sennepsgul"},
-    "Orange": {"de": "Orange", "es": "Naranja", "fr": "Orange", "da": "Orange"},
-    "Dark Orange": {"de": "Dunkelorange", "es": "Naranja oscuro", "fr": "Orange foncé", "da": "Mørkeorange"},
-    "Light Orange": {"de": "Hellorange", "es": "Naranja claro", "fr": "Orange clair", "da": "Lys orange"},
-    "Peach Orange": {"de": "Pfirsichorange", "es": "Naranja melocotón", "fr": "Orange pêche", "da": "Fersken orange"},
-    "Purple": {"de": "Lila", "es": "Morado", "fr": "Violet", "da": "Lilla"},
-    "Dark Purple": {"de": "Dunkellila", "es": "Púrpura oscuro", "fr": "Violet foncé", "da": "Mørkelilla"},
-    "Light Purple": {"de": "Helllila", "es": "Púrpura claro", "fr": "Violet clair", "da": "Lys lilla"},
-    "Lavender Purple": {"de": "Lavendel", "es": "Lavanda", "fr": "Lavande", "da": "Lavendel"},
-    "Purple": {"de": "Lila", "es": "Morado", "fr": "Violet", "da": "Lilla"},
-    "Magenta Pink": {"de": "Magenta", "es": "Rosa magenta", "fr": "Rose magenta", "da": "Magenta"},
-    "Brown": {"de": "Braun", "es": "Marrón", "fr": "Marron", "da": "Brun"},
-    "Dark Brown": {"de": "Dunkelbraun", "es": "Marrón oscuro", "fr": "Marron foncé", "da": "Mørkebrun"},
-    "Light Brown": {"de": "Hellbraun", "es": "Marrón claro", "fr": "Marron clair", "da": "Lys brun"},
-    "Lavender Purple": {"de": "Lavendel", "es": "Lavanda", "fr": "Lavande", "da": "Lavendel"},
-    "Navy": {"de": "Marine", "es": "Marina", "fr": "Marine", "da": "Marine"},
-    "Sky blue": {"de": "Himmelblau", "es": "Azul cielo", "fr": "Blue ciel", "da": "Himmelblå"},
-    "Coffee": {"de": "Kaffee", "es": "Café", "fr": "Café", "da": "Kaffe"}
+    "Black": {"de": "Schwarz", "es": "Negro", "fr": "Noir", "da": "Sort", "nl": "Zwart"},
+    "White": {"de": "Weiß", "es": "Blanco", "fr": "Blanc", "da": "Hvid", "nl": "Wit"},
+    "Gray": {"de": "Grau", "es": "Gris", "fr": "Gris", "da": "Grå", "nl": "Grijs"},
+    "Dark Gray": {"de": "Dunkelgrau", "es": "Gris oscuro", "fr": "Gris foncé", "da": "Mørkegrå", "nl": "Donkergrijs"},
+    "Light Gray": {"de": "Hellgrau", "es": "Gris claro", "fr": "Gris clair", "da": "Lysegrå", "nl": "Lichtgrijs"},
+    "Beige": {"de": "Beige", "es": "Beige", "fr": "Beige", "da": "Beige", "nl": "Beige"},
+    "Dark Beige": {"de": "Dunkelbeige", "es": "Beige oscuro", "fr": "Beige foncé", "da": "Mørk beige", "nl": "Donkerbeige"},
+    "Light Beige": {"de": "Hellbeige", "es": "Beige claro", "fr": "Beige clair", "da": "Lys beige", "nl": "Lichtbeige"},
+    "Blue": {"de": "Blau", "es": "Azul", "fr": "Bleu", "da": "Blå", "nl": "Blauw"},
+    "Dark Blue": {"de": "Dunkelblau", "es": "Azul oscuro", "fr": "Bleu foncé", "da": "Mørkeblå", "nl": "Donkerblauw"},
+    "Light Blue": {"de": "Hellblau", "es": "Azul claro", "fr": "Bleu clair", "da": "Lyseblå", "nl": "Lichtblauw"},
+    "Navy Blue": {"de": "Marineblau", "es": "Azul marino", "fr": "Bleu marine", "da": "Marineblå", "nl": "Marineblauw"},
+    "Green": {"de": "Grün", "es": "Verde", "fr": "Vert", "da": "Grøn", "nl": "Groen"},
+    "Dark Green": {"de": "Dunkelgrün", "es": "Verde oscuro", "fr": "Vert foncé", "da": "Mørkegrøn", "nl": "Donkergroen"},
+    "Light Green": {"de": "Hellgrün", "es": "Verde claro", "fr": "Vert clair", "da": "Lysegrøn", "nl": "Lichtgroen"},
+    "Olive": {"de": "Oliv", "es": "Oliva", "fr": "Olive", "da": "Oliven", "nl": "Olijfgroen"},
+    "Red": {"de": "Rot", "es": "Rojo", "fr": "Rouge", "da": "Rød", "nl": "Rood"},
+    "Pink": {"de": "Rosa", "es": "Rosa", "fr": "Rose", "da": "Lyserød", "nl": "Roze"},
+    "Dark Pink": {"de": "Dunkelrosa", "es": "Rosa oscuro", "fr": "Rose foncé", "da": "Mørk rosa", "nl": "Donkerroze"},
+    "Light Pink": {"de": "Hellrosa", "es": "Rosa claro", "fr": "Rose clair", "da": "Lys pink", "nl": "Lichtroze"},
+    "Yellow": {"de": "Gelb", "es": "Amarillo", "fr": "Jaune", "da": "Gul", "nl": "Geel"},
+    "Dark Yellow": {"de": "Dunkelgelb", "es": "Amarillo oscuro", "fr": "Jaune foncé", "da": "Mørkegul", "nl": "Donkergeel"},
+    "Light Yellow": {"de": "Hellgelb", "es": "Amarillo claro", "fr": "Jaune clair", "da": "Lysegul", "nl": "Lichtgeel"},
+    "Mustard Yellow": {"de": "Senfgelb", "es": "Amarillo mostaza", "fr": "Jaune moutarde", "da": "Sennepsgul", "nl": "Mosterdgeel"},
+    "Orange": {"de": "Orange", "es": "Naranja", "fr": "Orange", "da": "Orange", "nl": "Oranje"},
+    "Dark Orange": {"de": "Dunkelorange", "es": "Naranja oscuro", "fr": "Orange foncé", "da": "Mørkeorange", "nl": "Donkeroranje"},
+    "Light Orange": {"de": "Hellorange", "es": "Naranja claro", "fr": "Orange clair", "da": "Lys orange", "nl": "Lichtoranje"},
+    "Peach Orange": {"de": "Pfirsichorange", "es": "Naranja melocotón", "fr": "Orange pêche", "da": "Fersken orange", "nl": "Perzikoranje"},
+    "Purple": {"de": "Lila", "es": "Morado", "fr": "Violet", "da": "Lilla", "nl": "Paars"},
+    "Dark Purple": {"de": "Dunkellila", "es": "Púrpura oscuro", "fr": "Violet foncé", "da": "Mørkelilla", "nl": "Donkerpaars"},
+    "Light Purple": {"de": "Helllila", "es": "Púrpura claro", "fr": "Violet clair", "da": "Lys lilla", "nl": "Lichtpaars"},
+    "Lavender Purple": {"de": "Lavendel", "es": "Lavanda", "fr": "Lavande", "da": "Lavendel", "nl": "Lavendel"},
+    "Magenta Pink": {"de": "Magenta", "es": "Rosa magenta", "fr": "Rose magenta", "da": "Magenta", "nl": "Magenta"},
+    "Brown": {"de": "Braun", "es": "Marrón", "fr": "Marron", "da": "Brun", "nl": "Bruin"},
+    "Dark Brown": {"de": "Dunkelbraun", "es": "Marrón oscuro", "fr": "Marron foncé", "da": "Mørkebrun", "nl": "Donkerbruin"},
+    "Light Brown": {"de": "Hellbraun", "es": "Marrón claro", "fr": "Marron clair", "da": "Lys brun", "nl": "Lichtbruin"},
+    "Navy": {"de": "Marine", "es": "Marina", "fr": "Marine", "da": "Marine", "nl": "Marine"},
+    "Sky blue": {"de": "Himmelblau", "es": "Azul cielo", "fr": "Blue ciel", "da": "Himmelblå", "nl": "Hemelsblauw"},
+    "Coffee": {"de": "Kaffee", "es": "Café", "fr": "Café", "da": "Kaffe", "nl": "Koffie"}
+}
+
+SIZE_NAME_MAP = {
+    "Size": {"de": "Größe", "es": "Tamaño", "fr": "Taille", "da": "Størrelse", "nl": "Maat"},
+    "Sizes": {"de": "Größen", "es": "Tamaños", "fr": "Tailles", "da": "Størrelser", "nl": "Maten"},
 }
 
 def get_predefined_translation(original_text, target_language):
     """
-    Ensure predefined translations work properly before falling back to API translations.
+    Try to translate a string using predefined color or size maps.
+    Also handles compound values like 'Pink and Black'.
     """
-    original_text_lower = original_text.strip().lower()
+    original_text_clean = original_text.strip()
+    original_text_lower = original_text_clean.lower()
 
-    for english_name, translations in COLOR_NAME_MAP.items():
-        # ✅ First, check if original text matches the English name directly
-        if original_text_lower == english_name.lower():
-            return translations.get(target_language, english_name)  # Return mapped or default to English name
+    def match_predefined_maps(english_map):
+        for english_name, translations in english_map.items():
+            # ✅ Direct match with English key
+            if original_text_lower == english_name.lower():
+                return translations.get(target_language, english_name)
 
-        # ✅ Second, check if the original text matches any known translations in other languages
-        if original_text_lower in [val.lower() for val in translations.values()]:
-            mapped_translation = translations.get(target_language, english_name)  # Default to English name if missing
-            return mapped_translation if mapped_translation.lower() != original_text_lower else english_name
+            # ✅ Already in target language? Return as-is
+            for lang, translated_value in translations.items():
+                if original_text_lower == translated_value.strip().lower():
+                    if lang == target_language:
+                        return translated_value
+                    else:
+                        return translations.get(target_language, english_name)
+        return None
 
-    return None  # No predefined translation found
+    # ✅ Try single color/size translations
+    color_match = match_predefined_maps(COLOR_NAME_MAP)
+    if color_match:
+        return color_match
+
+    size_match = match_predefined_maps(SIZE_NAME_MAP)
+    if size_match:
+        return size_match
+
+    # 🎨 Try compound color names
+    separators = r"\s?(?:and|und|et|y|en|&|\+|\/|,)\s?"
+    parts = re.split(separators, original_text_clean)
+
+    translated_parts = []
+    found_any = False
+
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+
+        part_translated = match_predefined_maps(COLOR_NAME_MAP)
+        if part_translated:
+            translated_parts.append(part_translated)
+            found_any = True
+        else:
+            translated_parts.append(part)  # fallback to original
+
+    if found_any:
+        return " & ".join(translated_parts)
+
+    return None
+
 
 
 def detect_language(text):
@@ -168,15 +211,23 @@ def update_product_option_values(product_gid, option, target_language, source_la
 
     original_option_name = option["name"].strip()
 
-    # ✅ Translate Option Name
-    translated_option_name = clean_translated_text(apply_translation_method(
-        original_text=original_option_name,
-        method=translation_method,
-        custom_prompt="",
-        source_lang=source_language,
-        target_lang=target_language
-    ))
-    translated_option_name = clean_translated_text(translated_option_name)  # SECOND cleanup!
+    # ✅ Try predefined translation first (e.g. for "Size", "Maat", "Farbe", etc.)
+    predefined_translation = get_predefined_translation(original_option_name, target_language)
+
+    if predefined_translation:
+        translated_option_name = predefined_translation
+        logging.info(f"✅ Predefined translation for option name '{original_option_name}' → '{translated_option_name}'")
+    else:
+        # 🚀 Fall back to AI translation if no match
+        translated_option_name = clean_translated_text(apply_translation_method(
+            original_text=original_option_name,
+            method=translation_method,
+            custom_prompt="",
+            source_lang=source_language,
+            target_lang=target_language
+        ))
+        translated_option_name = clean_translated_text(translated_option_name)  # SECOND cleanup!
+
 
 
     logger.info(f"🔍 [DEBUG] Translated Option Name (before second cleaning): '{translated_option_name}'")
@@ -186,6 +237,7 @@ def update_product_option_values(product_gid, option, target_language, source_la
     logging.info(f"🌍 Translated Option Name: '{original_option_name}' → '{translated_option_name}'")
 
     for value in option["optionValues"]:
+        logging.debug(f"📌 All Option Values Being Processed: {[v['name'] for v in option['optionValues']]}")
         original_text = value["name"].strip()
         logging.info(f"🛠️ Processing Option Value: '{original_text}'")
 
@@ -212,7 +264,8 @@ def update_product_option_values(product_gid, option, target_language, source_la
                 target_lang=target_language
             ))
             logger.info(f"🔍 [DEBUG] Translated (before cleaning again): '{translated_name}'")
-            translated_name = clean_translated_text(translated_option_name)  # SECOND cleanup!
+            translated_name = clean_translated_text(translated_name)  # ✅ Proper cleanup of the actual value
+
 
 
 
@@ -224,7 +277,9 @@ def update_product_option_values(product_gid, option, target_language, source_la
             logging.warning(f"🧼 HTML entity cleanup: '{translated_name}' → '{clean_name}'")
 
         logging.info(f"✅ Final Value: '{original_text}' → '{clean_name}'")    
-        translated_values.append({"id": value["id"], "name": clean_name})
+        final_clean_name = clean_translated_text(clean_name)  # DOUBLE CLEAN!
+        translated_values.append({"id": value["id"], "name": final_clean_name})
+
 
     # ✅ Final debug log to verify translations
     logging.info(f"📦 Final Translated Option Name: {translated_option_name}")

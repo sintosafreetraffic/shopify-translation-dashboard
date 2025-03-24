@@ -179,6 +179,7 @@ def fetch_products_by_collection(collection_id, limit=50):
 # -------------------------------------------------------------------------
 # update_product_translation
 # -------------------------------------------------------------------------
+
 def update_product_translation(product_id, translated_title, translated_description):
     """
     Updates a Shopify product with a new title and description.
