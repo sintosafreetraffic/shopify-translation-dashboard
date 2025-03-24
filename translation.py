@@ -38,6 +38,13 @@ logger.info(f"DEEPL_API_KEY present? {'Yes' if DEEPL_API_KEY else 'No'}")
 # DETECT LANGUAGE FROM DESCRIPTION
 # ---------------------------------- #
 
+def clean_title(title: str) -> str:
+    """
+    Remove wrapping quotes or brackets from title.
+    """
+    return re.sub(r'^[\'"“”‘’\[\]\(\){}<>]+|[\'"“”‘’\[\]\(\){}<>]+$', '', title.strip())
+
+
 def detect_language_from_description(description: str) -> str:
     """
     Detects the source language from a larger description text using `langdetect`.
@@ -290,6 +297,10 @@ def chatgpt_translate_title(product_title: str, custom_prompt: str = "", target_
             if len(product_name_words) > 6:
                 product_name_trimmed = " ".join(product_name_words[:6])
                 title = f"{brand} | {product_name_trimmed}"
+
+        # 🧼 Clean wrapping quotes/brackets
+        title = clean_title(title)
+         
 
         return title
 
