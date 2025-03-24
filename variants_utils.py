@@ -10,6 +10,7 @@ from langdetect import detect
 from deep_translator import GoogleTranslator
 from deep_translator import DeeplTranslator
 
+
 SHOPIFY_STORE_URL = os.getenv("SHOPIFY_STORE_URL")
 SHOPIFY_API_KEY = os.getenv("SHOPIFY_API_KEY")
 
@@ -95,21 +96,21 @@ COLOR_NAME_MAP = {
 
 def get_predefined_translation(original_text, target_language):
     """
-    Check if the original text is a known color and return the predefined translation.
-    Works for bidirectional lookup (any language → target language).
-    Ensures that translation is different before returning.
+    Ensure predefined translations work properly before falling back to API translations.
     """
     original_text_lower = original_text.strip().lower()
 
     for english_name, translations in COLOR_NAME_MAP.items():
-        # Check if the input matches any known translation (across all languages)
+        # ✅ First, check if original text matches the English name directly
+        if original_text_lower == english_name.lower():
+            return translations.get(target_language, english_name)  # Return mapped or default to English name
+
+        # ✅ Second, check if the original text matches any known translations in other languages
         if original_text_lower in [val.lower() for val in translations.values()]:
-            mapped_translation = translations.get(target_language)  # Get mapped translation
-            
-            if mapped_translation and mapped_translation.lower() != original_text_lower:
-                return mapped_translation  # ✅ Return only if different from input
-            
-    return None  # No valid predefined translation found
+            mapped_translation = translations.get(target_language, english_name)  # Default to English name if missing
+            return mapped_translation if mapped_translation.lower() != original_text_lower else english_name
+
+    return None  # No predefined translation found
 
 
 def detect_language(text):
@@ -124,99 +125,86 @@ def detect_language(text):
 
 
 # Update product option values with translations
-def update_product_option_values(product_gid, option, target_language, source_language="auto", translation_method="None"):
+def update_product_option_values(product_gid, option, target_language, source_language="auto", translation_method="google"):
     translated_values = []
+    
+    logging.info(f"🔄 Translating Option: {option['name']} for Product ID: {product_gid}")
 
-    # ✅ Known sizes that should NOT be translated
+    # ✅ Skip known sizes (S, M, L) from translation
     KNOWN_SIZES = {"XXS", "XS", "S", "M", "L", "XL", "XXL", "XXXL", "XXXXL"}
 
     original_option_name = option["name"].strip()
 
-    # ✅ 1️⃣ Ensure Option Name is Translated Properly
-    logging.info(f"🌍 Translating option title '{original_option_name}' from '{source_language}' to '{target_language}'")
-
+    # ✅ Translate Option Name
     translated_option_name = apply_translation_method(
         original_text=original_option_name,
         method=translation_method,
         custom_prompt="",
-        source_lang=source_language,  # ✅ Explicitly pass source language (auto if not chosen)
+        source_lang=source_language,
         target_lang=target_language
     )
 
-    translated_values = []
+    logging.info(f"🌍 Translated Option Name: '{original_option_name}' → '{translated_option_name}'")
 
     for value in option["optionValues"]:
         original_text = value["name"].strip()
+        logging.info(f"🛠️ Processing Option Value: '{original_text}'")
 
-        # 🔒 Skip known sizes (S, M, L, etc.)
+        # ✅ Skip universal sizes (e.g. "S", "M", "L")
         if original_text.upper() in KNOWN_SIZES:
-            logging.info(f"🔒 Skipping translation for universal size '{original_text}'")
+            logging.info(f"🔒 Skipping known size '{original_text}'")
             translated_values.append({"id": value["id"], "name": original_text})
             continue
 
-        # ✅ Use predefined color translations if available
+        # ✅ Check predefined color translations
         predefined_translation = get_predefined_translation(original_text, target_language)
         if predefined_translation:
-            logging.info(f"🔄 '{original_text}' → '{predefined_translation}' (via predefined color map)")
-            translated_values.append({"id": value["id"], "name": predefined_translation})
-            continue  # 🚀 Skip API translation since we already mapped it!
+            logging.info(f"✅ Predefined translation found: '{original_text}' → '{predefined_translation}'")
+            translated_name = predefined_translation
         else:
-            logging.warning(f"⚠️ Predefined translation did not change '{original_text}', retrying API translation...")
-        # 🌍 Perform API translation (Google or DeepL)
-        logging.info(f"🌍 Translating '{original_text}' from '{source_language}' to '{target_language}' using {translation_method}")
+            # 🚀 No predefined match, use AI translation
+            logging.info(f"🚀 No predefined match for '{original_text}', using {translation_method} translation...")
 
-        # ✅ DeepL does NOT support "auto", so detect language first if needed
-        if translation_method == "deepl":
-            if source_language == "auto":
-                detected_lang = detect_language(original_text)  # ✅ Function to detect language
-                logging.info(f"🔍 Auto-detected source language: '{detected_lang}'")
-                source_language = detected_lang  # Use detected language
+            translated_name = apply_translation_method(
+                original_text=original_text,
+                method=translation_method,
+                custom_prompt="",
+                source_lang=source_language,
+                target_lang=target_language
+            )
 
-            translated_name = deepl_translate(original_text, source_language, target_language)
-        else:
-            translated_name = google_translate(original_text, source_language, target_language)
+            logging.info(f"🌍 AI Translated '{original_text}' → '{translated_name}'")
 
-        # 🚨 Retry translation if unchanged (but only for API translations, NOT predefined ones!)
-        if translated_name.lower() == original_text.lower():
-            logging.warning(f"⚠️ Translation unchanged for '{original_text}', retrying with slight modification...")
-
-            # 🔄 Check predefined color map again before retrying
-            retry_predefined_translation = get_predefined_translation(original_text, target_language)
-            if retry_predefined_translation and retry_predefined_translation != original_text:
-                logging.info(f"✅ Retried translation skipped: '{original_text}' already mapped to '{retry_predefined_translation}'")
-                translated_name = retry_predefined_translation  # **Force use of predefined translation**
-            else:
-                logging.warning(f"⚠️ Translation unchanged for '{original_text}', retrying with slight modification...")
-                retry_text = original_text + " "  # **Force retranslation**
-                if translation_method == "deepl":
-                    translated_name = deepl_translate(retry_text, source_language, target_language)
-                else:
-                    translated_name = google_translate(retry_text, source_language, target_language)
-
-        logging.info(f"🔄 '{original_text}' → '{translated_name}'")
+        # ✅ Append final translation to list
         translated_values.append({"id": value["id"], "name": translated_name})
 
-    # ✅ Shopify GraphQL mutation
+    # ✅ Final debug log to verify translations
+    logging.info(f"📦 Final Translated Option Name: {translated_option_name}")
+    logging.info(f"📦 Final Translated Values: {translated_values}")
+
+    # ✅ Shopify GraphQL mutation to update product options
+    # ✅ Shopify GraphQL mutation for updating product options
     mutation = """
     mutation updateProductOption($productId: ID!, $option: OptionUpdateInput!, $optionValuesToUpdate: [OptionValueUpdateInput!]!) {
-      productOptionUpdate(productId: $productId, option: $option, optionValuesToUpdate: $optionValuesToUpdate) {
+    productOptionUpdate(productId: $productId, option: $option, optionValuesToUpdate: $optionValuesToUpdate) {
         userErrors { field message }
-      }
+    }
     }
     """
 
     variables = {
         "productId": product_gid,
-        "option": {"id": option["id"], "name": translated_option_name},  # ✅ Use the translated option name
-        "optionValuesToUpdate": translated_values,
+        "option": {"id": option["id"], "name": translated_option_name},
+        "optionValuesToUpdate": [{"id": val["id"], "name": val["name"]} for val in translated_values],
     }
 
     response = requests.post(GRAPHQL_URL, headers=HEADERS, json={"query": mutation, "variables": variables})
     data = response.json()
 
+    # ✅ Log Shopify Response
     if "errors" in data or data["data"]["productOptionUpdate"]["userErrors"]:
-        logging.error(f"❌ Error updating options: {data}")
+        logging.error(f"❌ Shopify GraphQL Error: {data}")
         return False
     else:
-        logging.info(f"✅ Successfully updated options for {product_gid}")
+        logging.info(f"✅ Successfully updated Shopify product options for {product_gid}")
         return True

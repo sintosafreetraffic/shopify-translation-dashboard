@@ -1,10 +1,25 @@
 import os
+import sys
+from dotenv import load_dotenv
+load_dotenv()
+import uuid
+
+
 import requests
 import logging
 import openai
 import re
-from dotenv import load_dotenv
+from openai import OpenAI
+
+client = OpenAI(api_key=os.getenv("CHATGPT_API_KEY"))
+
+# 1) langdetect for auto-detection from descriptions
+from langdetect import detect, LangDetectException
+
+# 2) Google Translate from deep_translator
 from deep_translator import GoogleTranslator
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------- #
 # ENVIRONMENT VARIABLES / API KEYS
@@ -15,54 +30,81 @@ DEEPL_API_KEY = os.getenv("DEEPL_API_KEY")    # For DeepL
 # Set OpenAI key for global usage
 openai.api_key = OPENAI_API_KEY
 
-load_dotenv()
-
-client = openai.OpenAI(api_key=OPENAI_API_KEY)
+# Optional: confirm environment variables loaded
+logger.info(f"OPENAI_API_KEY present? {'Yes' if OPENAI_API_KEY else 'No'}")
+logger.info(f"DEEPL_API_KEY present? {'Yes' if DEEPL_API_KEY else 'No'}")
 
 # ---------------------------------- #
-# GOOGLE TRANSLATE
+# DETECT LANGUAGE FROM DESCRIPTION
 # ---------------------------------- #
-from deep_translator import GoogleTranslator
 
-def google_translate(
-    text: str,
-    source_language: str = "auto",  # "auto" => Google attempts detection
-    target_language: str = "de"     # e.g., "en", "de", "fr", "es", etc.
-) -> str:
+def detect_language_from_description(description: str) -> str:
     """
-    Translate text using Google (deep_translator).
+    Detects the source language from a larger description text using `langdetect`.
+    Returns 'auto' if detection fails or description is empty.
 
     Args:
-        text (str): The text to translate.
-        source_language (str): The source language code (e.g., "en") or "auto".
-        target_language (str): The target language code (e.g., "de" for German).
+        description (str): The product’s longer text/body_html from Shopify.
 
     Returns:
-        str: The translated text if successful, otherwise the original text.
+        str: A 2-letter ISO code like 'de', 'en', etc., or 'auto' if detection fails.
     """
-    if not text.strip():
-        return text  # Handle empty input safely
-
-    # Ensure language codes are lowercase to avoid errors
-    source_language = source_language.lower()
-    target_language = target_language.lower()
+    desc = description.strip()
+    if not desc:
+        logger.info("[detect_language_from_description] Description empty => returning 'auto'.")
+        return "auto"
 
     try:
-        translator = GoogleTranslator(
-            source=source_language,
-            target=target_language
-        )
-        return translator.translate(text)
+        detected_lang = detect(desc)
+        logger.info(f"[detect_language_from_description] Detected language: {detected_lang}")
+        return detected_lang
+    except LangDetectException:
+        logger.info("[detect_language_from_description] Could not detect => 'auto'.")
+        return "auto"
+
+# ---------------------------------- #
+# GOOGLE TRANSLATE WRAPPER
+# ---------------------------------- #
+def google_translate(
+    text: str,
+    source_language: str = "auto",  # "auto" => Google attempts detection (but can override with your own detection)
+    target_language: str = None     # e.g., "en", "de", "fr", "es", etc.
+) -> str:
+    """
+    Translate text using `deep_translator`'s GoogleTranslator.
+    
+    Args:
+        text (str): The text to translate.
+        source_language (str): The source language code (e.g., 'en', 'de') or 'auto'.
+        target_language (str): The target language code (e.g., 'de', 'en').
+
+    Returns:
+        str: The translated text if successful, otherwise the original text on error.
+    """
+    if not text.strip():
+        # Empty or whitespace text => return original
+        return text
+
+    # Ensure language codes are normalized
+    source_language = (source_language or "auto").lower()
+    target_language = (target_language or "en").lower()
+
+    try:
+        translator = GoogleTranslator(source=source_language, target=target_language)
+        translated = translator.translate(text)
+        logger.info(f"[google_translate] '{text[:30]}...' ({source_language} -> {target_language}) => '{translated[:30]}...'")
+        return translated
     except Exception as e:
-        print(f"[google_translate] Error: {e}")
-        return text  # Fallback to original text in case of error
+        logger.error(f"[google_translate] Error: {e}")
+        return text  # fallback to original text
 
-
-
+# ---------------------------------- #
+# LANGUAGE CODE MAPPING
+# ---------------------------------- #
 def language_code_to_descriptive(lang_code: str) -> str:
     """
-    Maps language codes like "de" -> "German", "en" -> "English", etc.
-    Expand or adjust as needed.
+    Maps language codes like 'de' -> 'German', 'en' -> 'English'.
+    Extend or modify as needed for your store’s languages.
     """
     mapping = {
         "de": "German",
@@ -73,6 +115,8 @@ def language_code_to_descriptive(lang_code: str) -> str:
         "nl": "Dutch"
     }
     return mapping.get(lang_code.lower(), "English")
+
+# Below are placeholders for default texts you may optionally use
 def get_default_title(target_lang):
     """Returns a default product title in the target language."""
     placeholders = {
@@ -137,33 +181,23 @@ def get_default_cta(target_lang):
     }
     return placeholders.get(target_lang, "Order now and elevate your wardrobe today!")
 
-
 # ---------------------------------- #
 # DEEPL TRANSLATE
 # ---------------------------------- #
 def deepl_translate(
     text: str,
-    source_language: str = "",     # If blank => auto-detect
-    target_language: str = "DE"    # e.g. "EN", "DE", "FR", ...
+    source_language: str = "",    # If blank => auto-detect
+    target_language: str = "DE"   # e.g., "EN", "DE", "FR", ...
 ) -> str:
     """
-    Translate text using DeepL API.
-    
-    If source_language is empty, DeepL will attempt to auto-detect.
-    If DEEPL_API_KEY is missing or there's an error, returns original text.
-    
-    Args:
-        text (str): The text to translate.
-        source_language (str): DeepL source code (e.g. "EN"). If blank, auto-detect.
-        target_language (str): DeepL target code (e.g. "DE").
-    
-    Returns:
-        str: Translated text or the original if something fails.
+    Translate text using the DeepL API.
+    If source_language is empty => DeepL attempts detection.
+    If DEEPL_API_KEY is missing or there's an error, returns the original text.
     """
     if not text.strip():
         return text
     if not DEEPL_API_KEY:
-        print("[deepl_translate] DeepL API key not found. Skipping translation.")
+        logger.warning("[deepl_translate] No DeepL API key found => skipping translation.")
         return text
 
     url = "https://api-free.deepl.com/v2/translate"
@@ -171,113 +205,126 @@ def deepl_translate(
         "auth_key": DEEPL_API_KEY,
         "text": text,
         "target_lang": target_language.upper()
-    } 
+    }
     if source_language:
         params["source_lang"] = source_language.upper()
 
     try:
         resp = requests.post(url, data=params)
         if resp.status_code == 200:
-            data = resp.json()
-            return data.get("translations", [{}])[0].get("text", text)
+            resp_data = resp.json()
+            return resp_data.get("translations", [{}])[0].get("text", text)
         else:
-            print(f"[deepl_translate] Error from DeepL: {resp.text}")
+            logger.error(f"[deepl_translate] DeepL returned {resp.status_code}: {resp.text}")
             return text
     except Exception as e:
-        print(f"[deepl_translate] API Request Failed: {e}")
+        logger.error(f"[deepl_translate] Request failed: {e}")
         return text
 
-
 # ---------------------------------- #
-# CHATGPT TRANSLATE
+# CHATGPT TITLE TRANSLATION
 # ---------------------------------- #
-
-# ---------- PRODUCT TITLE TRANSLATION ----------
 def chatgpt_translate_title(product_title: str, custom_prompt: str = "", target_language: str = "German") -> str:
     """
-    Translate product title while enforcing constraints:
-    - '[Human Name] | [Product Name]'
-    - Max 25 tokens
-    - Max 255 characters
-    - '[Product Name]' max 5 words
+    Translate product title with ChatGPT, enforcing constraints like '[Brand] | [Product Name]'.
+    Keeps final text ≤ 30 tokens, ≤ 285 chars, and max 6 words in the '[Product Name]' portion.
     """
     if not product_title.strip():
         return product_title
 
     system_instructions = (
-        "You are an expert e-commerce copywriter and translator. "
-        "Translate and rewrite product titles to make them persuasive, SEO-friendly, and fully adapted to the target language. "
-        "Ensure the translation follows the exact format '[Brand or Key Name] | [Product Name]'.\n\n"
-
-        "- **DO NOT** add quotation marks, brackets, or any extra formatting characters.\n"
-        "- The title must be **completely translated into {target_language}**—NO mixing of languages.\n"
+        f"You are an expert e-commerce copywriter and translator. "
+        f"Translate and rewrite product titles to make them persuasive, SEO-friendly, and fully adapted to the target language. "
+        f"Ensure the translation follows the exact format '[Brand or Key Name] | [Product Name]'.\n\n"
+        "- DO NOT add quotation marks, brackets, or any extra formatting characters.\n"
+        "- The title must be completely translated into {target_language} — NO mixing of languages.\n"
         "- Keep the exact format: '[Brand or Key Name] | [Product Name]'.\n"
-        "- The '[Product Name]' part must be **≤ 5 words**, but it must always be a complete phrase.\n"
-        "- The final title must be **≤ 25 tokens and ≤ 255 characters**, but NEVER cut off mid-word or mid-phrase.\n"
-        "- **DO NOT stop mid-sentence**—always return a full, readable, and well-structured title.\n"
-        "- **If a title is too long, rephrase or summarize it naturally instead of cutting it off.**\n"
-        "- **NEVER return an incomplete response.** If shortening is necessary, **keep the full product meaning.**\n"
-        "- Ensure the title remains persuasive, engaging, and suitable for e-commerce SEO.\n"
-        "- Use strong, emotionally engaging language that fits local marketing trends.\n"
+        "- '[Product Name]' part must be ≤ 5 words, but must remain a complete phrase.\n"
+        "- The final title must be ≤ 25 tokens & ≤ 255 chars, never cut mid-word.\n"
+        "- If a title is too long, rephrase or summarize naturally.\n"
+        "- NEVER return an incomplete response.\n"
+        "- Use persuasive, localized language.\n"
     )
-
-
 
     user_content = f"""
     Original Title: {product_title}
 
-    User Modifications (if any): {custom_prompt}
+    User Modifications: {custom_prompt}
 
-    Translate and rewrite this **entirely** into {target_language}, ensuring the title is fully localized, SEO-optimized, and persuasive.
-    The response **MUST be a complete, well-structured title**—DO NOT return half-finished titles.
-    If necessary, rephrase the title to fit the length while keeping it readable and natural.
+    Translate and rewrite entirely into {target_language}, fully localized and SEO-optimized.
+    Return a complete, well-structured title. If too long, rephrase naturally while keeping the meaning.
     """
 
-
-    messages = [{"role": "system", "content": system_instructions}, {"role": "user", "content": user_content}]
+    messages = [
+        {"role": "system", "content": system_instructions},
+        {"role": "user", "content": user_content}
+    ]
 
     try:
         response = client.chat.completions.create(
-        model="gpt-4",
-        messages=messages,
-        max_tokens=50
-    )
+            model="gpt-4",
+            messages=messages,
+            max_tokens=60
+        )
 
-        title = response.choices[0].message.content.strip()
+        if not response.choices or not response.choices[0].message.content:
+            logger.warning("⚠️ Empty ChatGPT title response. Using original title.")
+            return product_title
 
-        logging.info("🔥 Full ChatGPT Output:\n%s", title)
+        raw_title = response.choices[0].message.content.strip()
+        logger.info("🔥 Full ChatGPT Output:\n%s", raw_title)
 
+        # Enforce length limits
+        title_tokens = raw_title.split()
+        title = " ".join(title_tokens[:30])
+        if len(title) > 285:
+            title = title[:285]
+            if " " in title:
+                title = title.rsplit(" ", 1)[0]
 
-        # Enforce constraints
-        title_tokens = title.split()
-        title = " ".join(title_tokens[:25])[:255]
-
+        # Enforce max 6 words in [Product Name] portion
         if "|" in title:
             parts = title.split("|")
-            human_name = parts[0].strip()
+            brand = parts[0].strip()
             product_name_words = parts[1].strip().split()
-            if len(product_name_words) > 5:
-                trimmed_product_name = " ".join(product_name_words[:5])
-                title = f"{human_name} | {trimmed_product_name}"
+            if len(product_name_words) > 6:
+                product_name_trimmed = " ".join(product_name_words[:6])
+                title = f"{brand} | {product_name_trimmed}"
 
         return title
 
     except Exception as e:
-        logging.error(f"chatgpt_translate_title error: {e}")
-        return product_title  # Fallback
-    
-    
-def chatgpt_translate(text: str, custom_prompt: str = "", target_language: str = "German",
-                      field_type: str = "description", product_title: str = "") -> str:
-    """
-    Translate or rewrite product description using ChatGPT with structured output.
-    """
+        logger.error(f"chatgpt_translate_title error: {e}")
+        return product_title  # fallback
 
+    
+    
+def chatgpt_translate(
+    text: str, 
+    custom_prompt: str = "", 
+    target_language: str = "German",
+    field_type: str = "description", 
+    product_title: str = ""
+) -> str:
+
+    """
+    Translate or rewrite product text using ChatGPT with a structured output format.
+
+    Args:
+        text (str): The text (usually product description) to translate or rewrite.
+        custom_prompt (str): Additional user instructions for ChatGPT.
+        target_language (str): The language code for translation (e.g. "en", "de").
+        field_type (str): Type of content ("description", "title", etc.) – for potential future usage.
+        product_title (str): An optional product title to pass as context to ChatGPT.
+
+    Returns:
+        str: The translated or rewritten text. Returns original text on failure.
+    """
     if not text.strip():
         return text
 
     if not OPENAI_API_KEY:
-        logging.error("[chatgpt_translate] OpenAI API key not found. Returning original text.")
+        logging.error("[chatgpt_translate] No OPENAI_API_KEY found. Returning original text.")
         return text
 
     client = openai.OpenAI(api_key=OPENAI_API_KEY)
@@ -287,16 +334,15 @@ def chatgpt_translate(text: str, custom_prompt: str = "", target_language: str =
         "You are an expert e-commerce copywriter. Clearly rewrite the provided product description "
         "into a structured format exactly as follows (strictly in the target language provided):\n\n"
         "Product Title: (Enticing, SEO-friendly title in format: '[Human Name] | [Product Name]')\n"
-        "Short Introduction: (minimum 3 and maximum 5 sentence of introduction to engage the buyer)\n\n"
+        "Short Introduction: (3–5 sentences to engage the buyer)\n\n"
         "Product Advantages:\n"
-        "- [Feature Name]: [A compelling, benefit-driven description that highlights why this feature improves comfort, style, or versatility. Make it feel exclusive.]\n"
-        "- [Feature Name]: [Use power words like ‘luxurious,’ ‘effortlessly stylish,’ ‘perfect fit,’ ‘irresistible comfort’ to create desire.]\n"
-        "- [Feature Name]: [Connect the feature to real-life benefits. Example: ‘The breathable fabric keeps you cool and confident all day long.’]\n"
-        "- (Add more if needed)\n\n"
-        "\n💡 **Important: Write bullet points in a way that sells the product! Don't just describe features, explain why they matter and why the customer needs them.**"
-        "DO NOT list single-word features, and DO NOT omit the description.**"
-        "Call to Action: Short, persuasive closing sentence\n\n"
-        "**IMPORTANT:** Always respond exactly in this structure with no missing sections."
+        "- [Feature Name]: [Benefit-driven detail that explains why the customer needs it.]\n"
+        "- [Feature Name]: [Use power words like ‘luxurious’ or ‘perfect fit’ to create desire.]\n"
+        "- [Feature Name]: [Link each feature to a real-life benefit. E.g. ‘Breathable fabric...’]\n"
+        "- (Add more bullets if needed)\n\n"
+        "💡 **Important**: bullet points must SELL, not just describe. Do NOT omit the product description.\n"
+        "Call to Action: short, persuasive closing sentence.\n\n"
+        "**IMPORTANT**: Respond exactly in this structure, no missing sections."
     )
 
     user_content = (
@@ -317,67 +363,156 @@ def chatgpt_translate(text: str, custom_prompt: str = "", target_language: str =
             messages=messages,
             temperature=0.7,
             max_tokens=1500,
+            n=1  # Single response 
         )
 
         ai_output = response.choices[0].message.content.strip()
-
-        logging.info("✅ ChatGPT response received:")
-        logging.info(ai_output)  # Debugging output
+        logging.info("✅ [chatgpt_translate] ChatGPT response received:\n%s", ai_output)
 
         return ai_output
 
     except Exception as e:
         logging.error(f"[chatgpt_translate] Error: {e}")
-        return text  # Fallback to original
-    
+        return text  # Fallback
 
-
-    
 # ---------------------------------- #
-# PRIMARY DISPATCH: apply_method
+# apply_translation_method
 # ---------------------------------- #
+def apply_translation_method(
+    original_text, 
+    method, 
+    custom_prompt, 
+    source_lang, 
+    target_lang, 
+    product_title="", 
+    field_type=None,
+    description=None
+):
+    logging.info("Using this apply_translation_method. The one of tranlsation.py")
+    """
+    Translates text using the chosen method (google, deepl, or chatgpt).
+    If source_lang=='auto' and method=='google', attempts language detection from `description`.
 
-def apply_translation_method(original_text, method, custom_prompt, source_lang, target_lang, product_title="", field_type=None):
+    Args:
+        original_text (str): The text to translate (title, description, etc.).
+        method (str): "google", "deepl", or "chatgpt".
+        custom_prompt (str): Additional instructions for ChatGPT (if used).
+        source_lang (str): Source language (e.g. "auto", "en", "de", ...).
+        target_lang (str): Target language code (e.g. "de", "en", ...).
+        product_title (str): Optional product title for ChatGPT context.
+        field_type (str): e.g. "title", "description" – for logging or future usage.
+        description (str): A larger chunk of text (e.g. body_html) to help detect the language if `source_lang=="auto"`.
+
+    Returns:
+        str: The translated text, or original if something fails.
     """
-    Translates text using the selected method (Google, DeepL, or ChatGPT).
-    """
+    logging.info(
+        "[apply_translation_method] START: method=%s, source_lang=%s, target_lang=%s, "
+        "field_type=%s, has_description=%s",
+        method,
+        source_lang,
+        target_lang,
+        field_type,
+        bool(description)
+    )
+
     if not original_text or not method:
-        logging.warning("⚠️ Empty text or missing method. Returning original text.")
+        logging.warning("⚠️ [apply_translation_method] Missing text or method => returning original.")
         return original_text
-
-    logging.info(f"🚀 Translating [{original_text[:50]}...] via '{method}' to '{target_lang}' (Field: {field_type})")
 
     try:
         translated_text = original_text
 
+        # If original_text is a list, handle each item
         if isinstance(original_text, list):
-            return [apply_translation_method(text, method, custom_prompt, source_lang, target_lang, field_type=field_type) for text in original_text]
+            logging.info("[apply_translation_method] original_text is a list => applying recursively.")
+            return [
+                apply_translation_method(
+                    text,
+                    method,
+                    custom_prompt,
+                    source_lang,
+                    target_lang,
+                    product_title=product_title,
+                    field_type=field_type,
+                    description=description
+                )
+                for text in original_text
+            ]
 
         method_lower = method.lower()
-        
+
+        # A) ChatGPT
         if method_lower == "chatgpt":
-            translated_text = chatgpt_translate(original_text, custom_prompt, target_lang, product_title)
+            logging.info("[apply_translation_method] Using ChatGPT => target_lang=%s", target_lang)
+            translated_text = chatgpt_translate(original_text, custom_prompt, target_lang, field_type, product_title)
+
+        # B) Google
         elif method_lower == "google":
+            logging.info("[apply_translation_method] Using Google => source=%s, target=%s", source_lang, target_lang)
+            # If user said "auto" & we have a description => detect
+            if source_lang.lower() == "auto" and description:
+                logging.info("[apply_translation_method] source_lang='auto' => attempting detection from description.")
+                desc = description.strip()
+                if desc:
+                    from langdetect import detect, LangDetectException
+                    try:
+                        detected_lang = detect(desc)
+                        logging.info("[apply_translation_method] Detected => '%s' from description", detected_lang)
+                        if detected_lang != "auto":
+                            source_lang = detected_lang
+                    except LangDetectException:
+                        logging.info("[apply_translation_method] LangDetectException => remain 'auto'")
+                else:
+                    logging.info("[apply_translation_method] description empty => remain 'auto'")
+
+            # Now call google_translate
+            logging.info("[apply_translation_method] final google_translate => source='%s' to '%s'", source_lang, target_lang)
             translated_text = google_translate(original_text, source_lang, target_lang)
+
+        # C) DeepL
         elif method_lower == "deepl":
+            logging.info("[apply_translation_method] Using DeepL => source=%s, target=%s", source_lang, target_lang)
             translated_text = deepl_translate(original_text, source_lang, target_lang)
+
+        # D) Unknown
         else:
-            logging.warning(f"⚠️ Unknown translation method '{method}'. Returning original text.")
+            logging.warning("[apply_translation_method] Unknown method='%s' => returning original.", method)
+
+        logging.info("✅ [apply_translation_method] complete: '%s...' => '%s...'",
+                     original_text[:50], translated_text[:50])
+        return translated_text
 
     except Exception as e:
-        logging.error(f"❌ Translation failed: {e}")
-        translated_text = original_text
+        logging.error("❌ [apply_translation_method] Translation failed: %s", e)
+        return original_text
 
-    logging.info(f"✅ Translation complete: '{original_text[:50]}...' → '{translated_text[:50]}...'")
-    return translated_text
-
+    
 def parse_ai_description(ai_text, language='en'):
+    """
+    Parse an AI-generated text (ChatGPT or other) that should contain a structured format:
+    - Title: ...
+    - Introduction: ...
+    - Features: ...
+    - CTA: ...
+
+    Args:
+        ai_text (str): The full AI response text containing the structured content.
+        language (str): Optional language code (not heavily used here, but reserved for future expansions).
+
+    Returns:
+        dict: {
+          "title": str,
+          "introduction": str,
+          "features": list of str,
+          "cta": str
+        }
+    """
     # Initialize defaults
     title = intro = cta = ""
     features = []
 
     # 1. Extract Title
-    # Look for a line that starts with "Title:" (case-insensitive) or take the first line as title.
     match = re.search(r'^(?:Title|Product\s*Title)[:\-]\s*(.+)', ai_text, flags=re.IGNORECASE | re.MULTILINE)
     if match:
         title = match.group(1).strip()
@@ -392,11 +527,10 @@ def parse_ai_description(ai_text, language='en'):
     if match:
         intro = match.group(1).strip()
     else:
-        # If not found by label, use the line after the title (if it exists)
-        if 'intro' not in locals() or not intro:  # not already set by label
-            lines = ai_text.strip().splitlines()
-            if len(lines) > 1:
-                intro = lines[1].strip()
+        # If not found by label, try the line after the title
+        lines = ai_text.strip().splitlines()
+        if len(lines) > 1:
+            intro = lines[1].strip()
 
     # 3. Extract Features (bullet points list)
     features_section = ""
@@ -407,12 +541,12 @@ def parse_ai_description(ai_text, language='en'):
         # If no "Features" label, attempt to find bullet points in text
         features_section = ai_text
 
-    # Split the features section into individual bullet points.
+    # Split the features section into individual bullet points
     for line in features_section.splitlines():
         line = line.strip()
         if not line:
-            continue  # skip empty lines
-        # Identify bullet point lines (starting with a dash, asterisk, or number)
+            continue
+        # Identify bullet point lines (dash, asterisk, or number)
         if line.startswith(('-', '*', '•', '1.', '2.', '3.')):
             # Remove any leading bullet symbols or numbering
             point = line.lstrip("-*•0123456789. ").strip()
@@ -424,25 +558,26 @@ def parse_ai_description(ai_text, language='en'):
     if match:
         cta = match.group(1).strip()
     else:
-        # If "CTA" label not found, take the last line as CTA (if it's not already used as a feature)
+        # If "CTA" label not found, attempt last line if it's not used above
         lines = ai_text.strip().splitlines()
         if lines:
             last_line = lines[-1].strip()
-            if last_line and last_line.lower().startswith(('cta', 'call to action')):  # labeled differently
+            if last_line and last_line.lower().startswith(('cta', 'call to action')):
                 # If the last line has 'CTA' text without colon
                 cta = last_line.split(':', 1)[-1].strip() if ':' in last_line else last_line
             elif last_line and last_line not in title and last_line not in intro and last_line not in " ".join(features):
                 cta = last_line
 
     return {
-    "title": title.strip(),
-    "introduction": intro.strip(),
-    "features": features,
-    "cta": cta.strip()
-}
+        "title": title.strip(),
+        "introduction": intro.strip(),
+        "features": features,
+        "cta": cta.strip()
+    }
 
-
-
+# ---------------------------------- #
+# apply_method
+# ---------------------------------- #
 def apply_method(
     text: str,
     method: str,
@@ -452,40 +587,40 @@ def apply_method(
     field_type: str = "description"
 ) -> str:
     """
-    Dispatch to the correct translation approach:
-      - "google"
-      - "deepl"
-      - "chatgpt"
-    (No chaining references here.)
-    
+    A simple dispatch function for text translation / rewriting:
+        - "google" => calls google_translate(...)
+        - "deepl"  => calls deepl_translate(...)
+        - "chatgpt" => calls chatgpt_translate(...)
+    (No chaining references or auto-detection logic here.)
+
     Args:
         text (str): The text to translate or rewrite.
-        method (str): The chosen method ("google", "deepl", or "chatgpt").
-        custom_prompt (str): Additional instructions for ChatGPT.
-        source_language (str): Source language code or "auto" for Google/"" for DeepL.
-        target_language (str): Target language code (e.g. "de", "en", "fr").
-        field_type (str): Type of content (title, description, handle, etc.).
-    
+        method (str): "google", "deepl", or "chatgpt".
+        custom_prompt (str): Additional instructions for ChatGPT usage.
+        source_language (str): The source language (default 'auto' for Google).
+        target_language (str): The target language code (e.g., 'en', 'de').
+        field_type (str): The content type (e.g. 'description', 'title', etc.) – not heavily used here.
+
     Returns:
-        str: The translated or rewritten text.
+        str: The translated or rewritten text. Returns original if unrecognized method.
     """
     method_lower = method.lower()
+    logging.info(f"[apply_method] method={method_lower}, source={source_language}, target={target_language}, field_type={field_type}")
 
     if method_lower == "google":
-        return google_translate(
-            text,
-            source_language=source_language,
-            target_language=target_language
-        )
+        # Google tries 'auto' if source_language='auto'. We do NOT do langdetect here.
+        return google_translate(text, source_language=source_language, target_language=target_language)
+
     elif method_lower == "deepl":
-        # DeepL typically expects uppercase for the target_lang
+        # DeepL typically wants uppercase target_lang
         return deepl_translate(
             text,
             source_language=source_language,
             target_language=target_language.upper()
         )
+
     elif method_lower == "chatgpt":
-        # e.g., "de" => "German", "en" => "English", etc.
+        # e.g., 'de' => 'German'
         descriptive_lang = language_code_to_descriptive(target_language)
         return chatgpt_translate(
             text,
@@ -493,7 +628,8 @@ def apply_method(
             target_language=descriptive_lang,
             field_type=field_type
         )
-    else:
-        print(f"[apply_method] Unrecognized method '{method}'. Returning original text.")
-        return text
 
+    else:
+        # Unknown method => return text unmodified
+        logging.warning(f"[apply_method] Unrecognized method '{method}'. Returning original text.")
+        return text

@@ -1,0 +1,9 @@
+[2025-03-14 11:09:57 +0100] [10640] [INFO] Starting gunicorn 23.0.0
+[2025-03-14 11:09:57 +0100] [10640] [INFO] Listening at: http://0.0.0.0:5003 (10640)
+[2025-03-14 11:09:57 +0100] [10640] [INFO] Using worker: sync
+[2025-03-14 11:09:57 +0100] [10649] [INFO] Booting worker with pid: 10649
+[2025-03-14 11:09:57 +0100] [10654] [INFO] Booting worker with pid: 10654
+[2025-03-14 11:09:57 +0100] [10655] [INFO] Booting worker with pid: 10655
+2025-03-14 11:09:58,354 - INFO - Database initialized.
+2025-03-14 11:09:58,354 - INFO - Database initialized.
+2025-03-14 11:09:58,354 - INFO - Database initialized.
