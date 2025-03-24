@@ -3,14 +3,14 @@ import re
 import time
 import logging
 import requests
+import json
 
 # -------------------------------------------------------------------------
 # Configure Logging (adjust level as needed)
 # -------------------------------------------------------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
 # -------------------------------------------------------------------------
 # Shopify API Credentials
@@ -181,10 +181,10 @@ def fetch_products_by_collection(collection_id, limit=50):
 # -------------------------------------------------------------------------
 def update_product_translation(product_id, translated_title, translated_description):
     """
-    Updates a Shopify product with a new title and description (body_html).
+    Updates a Shopify product with a new title and description.
     Returns the updated product dict on success, or None on failure.
     """
-    url = f"{SHOPIFY_API_BASE}/products/{product_id}.json"
+    url = f"https://{SHOPIFY_STORE_URL}/admin/api/2023-04/products/{product_id}.json"
     headers = {
         "X-Shopify-Access-Token": SHOPIFY_API_KEY,
         "Content-Type": "application/json"
@@ -199,17 +199,21 @@ def update_product_translation(product_id, translated_title, translated_descript
     }
 
     try:
-        resp = requests.put(url, json=payload, headers=headers, timeout=10)
+        response = requests.put(url, json=payload, headers=headers, timeout=10)
+        response.raise_for_status()  # This will raise an error if response is 4xx or 5xx
+        json_response = response.json()
+
+        if "errors" in json_response:
+            logger.error(f"❌ Shopify API error: {json_response['errors']}")
+            return None  # Return None if there are errors
+
+        logger.info(f"✅ Successfully updated product {product_id}: {json_response}")
+        return json_response.get("product", {})
+    
     except requests.exceptions.RequestException as e:
-        logging.error(f"⚠️ Network error while updating product {product_id}: {e}")
+        logger.error(f"❌ Shopify update failed: {e}")
         return None
 
-    if resp.status_code == 200:
-        logging.info(f"✅ Successfully updated product {product_id}")
-        return resp.json().get("product", {})
-    else:
-        logging.error(f"❌ Failed to update product {product_id}: {resp.status_code} {resp.text}")
-        return None
 
 # -------------------------------------------------------------------------
 # (Optional) fetch_product_by_url

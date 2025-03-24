@@ -2,26 +2,30 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Shopify Translation Dashboard</title>
-  <link
-    rel="stylesheet"
-    href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.0/css/bootstrap.min.css"
-  />
+  <link rel="icon" href="data:,">
+
+  <!-- Bootstrap CSS -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.0/css/bootstrap.min.css" />
+
+  <!-- jQuery -->
   <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+
 
   <style>
     .method-options {
       margin-left: 20px;
       margin-bottom: 10px;
-      display: none; /* hidden until user checks that field */
+      display: none;
     }
     .chatgpt-prompt {
       margin-top: 5px;
-      display: none; /* only shown if user picks 'chatgpt' radio */
+      display: none;
     }
     #singleProductCard,
     #fieldsCard {
-      display: none; /* hidden until products are loaded */
+      display: none;
     }
     #testRunOutput {
       background-color: #f9f9f9;
@@ -34,7 +38,7 @@
       margin-top: 10px;
     }
     .progress-bar {
-      transition: width 0.4s ease; /* progress bar animation */
+      transition: width 0.4s ease;
     }
     .prompt-examples, .tone-examples {
       margin: 10px 0;
@@ -46,12 +50,10 @@
   </style>
 </head>
 <body>
+
 <div class="container mt-4">
-  <h1>Shopify Translation !Dashboard!?</h1>
-  <p>
-    Translate your Shopify products using Google, DeepL, or ChatGPT.
-    Optionally preserve HTML formatting and insert images with ChatGPT.
-  </p>
+  <h1>Shopify Translation Dashboard</h1>
+  <p>Translate your Shopify products using Google, DeepL, or ChatGPT. Optionally preserve HTML formatting and insert images with ChatGPT.</p>
 
   <!-- A) LANGUAGE SELECTION -->
   <div class="card p-3 mb-3">
@@ -79,30 +81,15 @@
     </div>
   </div>
 
-
   <!-- B) LOAD COLLECTION -->
   <div class="card p-3 mb-3">
     <h4>Load by Collection</h4>
-    <div id="collectionLoading" class="text-muted">Fetching collections...</div>
     <select id="collectionDropdown" class="form-select mb-2">
       <option value="" disabled selected>Loading collections…</option>
     </select>
-    <button class="btn btn-primary" id="fetchProductsByCollection">Load Products</button>
+    <button class="btn btn-primary" onclick="fetchProductsByCollection()">Load Products</button>
     <div id="collectionInfo" class="mt-2"></div>
-    <div id="productLoading" class="text-muted" style="display:none;">Loading products...</div>
   </div>
-
-  <style>
-   #collectionDropdown {
-  width: auto; /* Let it expand naturally */
-  min-width: 250px; /* Adjust as needed */
-  max-width: 400px; /* Prevent too wide expansion */
-  white-space: normal; /* Allow text to wrap */
-  word-wrap: break-word; /* Ensure wrapping */
-  overflow: visible; /* Ensure content is not hidden */
-}
-  </style>
-  
 
   <!-- C) GOOGLE SHEET UPLOAD -->
   <div class="card p-3 mb-3">
@@ -127,611 +114,88 @@
     <div id="sheetInfo" class="mt-2"></div>
   </div>
 
-  <!-- D) SINGLE PRODUCT CARD (TEST) -->
-  <div id="singleProductCard" class="card p-3 mb-3">
-    <h4>Test Product (First One Loaded)</h4>
-    <div id="testProductInfo"></div>
-    <div id="testRunOutput"></div>
-  </div>
+<!-- D) SINGLE PRODUCT CARD (TEST) -->
+<div id="singleProductCard" class="card p-3 mb-3">
+  <h4>Test Product (First One Loaded)</h4>
+  <div id="testProductInfo"></div>
+  <h5 class="mt-3">Test Run Output:</h5>
+  <div id="testRunOutput" class="p-2 border bg-light"></div>
+</div>
+
 
   <!-- E) FIELDS & METHODS -->
-  <div id="fieldsCard" class="card p-3 mb-3">
-    <h4>Fields & Methods</h4>
-    <p>
-      Select which fields to translate, pick a method, and optionally provide a ChatGPT prompt if that method is chosen. 
-      Then do a “TEST RUN” on the first product or “RUN ALL PRODUCTS.”
-    </p>
+<div id="fieldsCard" class="card p-3 mb-3">
+  <h4>Fields & Methods</h4>
+  <p>Select which fields to translate and choose a method for each.</p>
 
-    <form id="fieldSelectionForm">
-      <!-- Title -->
-      <div class="form-check mb-2">
-        <input class="form-check-input" type="checkbox" name="fields" value="title" id="titleField">
-        <label class="form-check-label" for="titleField">Product Title</label>
-        <div class="method-options" id="methodOptionsTitle">
-          <label><input type="radio" name="titleMethod" value="google" checked> Google</label>
-          <label><input type="radio" name="titleMethod" value="deepl"> DeepL</label>
-          <label><input type="radio" name="titleMethod" value="chatgpt"> ChatGPT</label>
-          <!-- No chaining -->
-          <textarea
-            id="chatgptPromptTitle"
-            class="form-control chatgpt-prompt"
-            rows="2"
-            placeholder="Custom ChatGPT prompt for Title..."
-          ></textarea>
-        </div>
+  <form id="fieldSelectionForm">
+    <!-- Product Title -->
+      <div class="mb-3">
+          <label class="form-label"><strong>Product Title</strong></label>
+          <input type="checkbox" class="form-check-input" name="fields" value="title" id="titleField">
+          <select class="form-select field-method" id="titleMethod">
+              <option value="google">Google Translate</option>
+              <option value="deepl">DeepL</option>
+              <option value="chatgpt">ChatGPT</option>
+          </select>
+          <div class="chatgpt-prompt" id="titlePromptContainer">
+              <label class="form-label">Custom Prompt for Title:</label>
+              <textarea id="titlePrompt" class="form-control" rows="2"></textarea>
+          </div>
       </div>
 
-      <!-- Description -->
-      <div class="form-check mb-2">
-        <input class="form-check-input" type="checkbox" name="fields" value="body_html" id="descField">
-        <label class="form-check-label" for="descField">Product Description</label>
-        <div class="method-options" id="methodOptionsBody_html">
-          <label><input type="radio" name="body_htmlMethod" value="google" checked> Google</label>
-          <label><input type="radio" name="body_htmlMethod" value="deepl"> DeepL</label>
-          <label><input type="radio" name="body_htmlMethod" value="chatgpt"> ChatGPT</label>
-          <textarea
-            id="chatgptPromptDesc"
-            class="form-control chatgpt-prompt"
-            rows="3"
-            placeholder="Custom ChatGPT prompt for Description..."
-          ></textarea>
-        </div>
+      <!-- Product Description -->
+      <div class="mb-3">
+          <label class="form-label"><strong>Product Description</strong></label>
+          <input type="checkbox" class="form-check-input" name="fields" value="body_html" id="descField">
+          <select class="form-select field-method" id="descMethod">
+              <option value="google">Google Translate</option>
+              <option value="deepl">DeepL</option>
+              <option value="chatgpt">ChatGPT</option>
+          </select>
+          <div class="chatgpt-prompt" id="descPromptContainer">
+              <label class="form-label">Custom Prompt for Description:</label>
+              <textarea id="descPrompt" class="form-control" rows="3"></textarea>
+          </div>
       </div>
 
-      <!-- Tags -->
-      <div class="form-check mb-2">
-        <input class="form-check-input" type="checkbox" name="fields" value="tags" id="tagsField">
-        <label class="form-check-label" for="tagsField">Product Tags</label>
-        <div class="method-options" id="methodOptionsTags">
-          <label><input type="radio" name="tagsMethod" value="google" checked> Google</label>
-          <label><input type="radio" name="tagsMethod" value="deepl"> DeepL</label>
-          <label><input type="radio" name="tagsMethod" value="chatgpt"> ChatGPT</label>
-          <textarea
-            id="chatgptPromptTags"
-            class="form-control chatgpt-prompt"
-            rows="2"
-            placeholder="Custom ChatGPT prompt for Tags..."
-          ></textarea>
-        </div>
+      <div class="mb-3">
+          <label class="form-label"><strong>Product Variants & Values</strong></label>
+          <input type="checkbox" class="form-check-input" name="fields" value="variants" id="variantsField">
+          <select class="form-select field-method" id="variantsMethod">
+              <option value="google">Google Translate</option>
+              <option value="deepl">DeepL</option>
+              <option value="chatgpt">ChatGPT</option>
+          </select>
       </div>
+  </form>
 
-      <!-- Handle -->
-      <div class="form-check mb-2">
-        <input class="form-check-input" type="checkbox" name="fields" value="handle" id="handleField">
-        <label class="form-check-label" for="handleField">Product Handle</label>
-        <div class="method-options" id="methodOptionsHandle">
-          <label><input type="radio" name="handleMethod" value="google" checked> Google</label>
-          <label><input type="radio" name="handleMethod" value="deepl"> DeepL</label>
-          <label><input type="radio" name="handleMethod" value="chatgpt"> ChatGPT</label>
-          <textarea
-            id="chatgptPromptHandle"
-            class="form-control chatgpt-prompt"
-            rows="2"
-            placeholder="Custom ChatGPT prompt for Handle..."
-          ></textarea>
-        </div>
-      </div>
+</div>
+</form>
 
-      <!-- Variant Options -->
-      <div class="form-check mb-2">
-        <input class="form-check-input" type="checkbox" name="fields" value="variant_options" id="variantOptionsField">
-        <label class="form-check-label" for="variantOptionsField">Variant Options &amp; Names</label>
-        <div class="method-options" id="methodOptionsVariant_options">
-          <label><input type="radio" name="variant_optionsMethod" value="google" checked> Google</label>
-          <label><input type="radio" name="variant_optionsMethod" value="deepl"> DeepL</label>
-          <label><input type="radio" name="variant_optionsMethod" value="chatgpt"> ChatGPT</label>
-          <textarea
-            id="chatgptPromptVariants"
-            class="form-control chatgpt-prompt"
-            rows="2"
-            placeholder="Custom ChatGPT prompt for Variant Options..."
-          ></textarea>
-        </div>
-      </div>
-    </form>
+<div id="bulkProgressContainer" style="display:none; margin-top: 1em;">
+  <div style="border: 1px solid #ccc; width: 100%;">
+    <div id="bulkProgressBar" style="height: 20px; width: 0%; background-color: #4caf50;"></div>
+  </div>
+  <div id="bulkProgressLabel">0%</div>
+</div>
 
-    <!-- PROMPT EXAMPLES -->
-    <div class="prompt-examples">
-      <h5>Prompt Examples:</h5>
-      <button
-        class="btn btn-sm btn-outline-secondary"
-        onclick="insertPrompt('Make it SEO friendly and highlight key features.')"
-      >
-        SEO-Friendly Prompt
-      </button>
-      <button
-        class="btn btn-sm btn-outline-secondary"
-        onclick="insertPrompt('Keep it short and sweet, focusing on benefits.')"
-      >
-        Short &amp; Sweet Prompt
-      </button>
-      <button
-        class="btn btn-sm btn-outline-secondary"
-        onclick="insertPrompt(
-`Write an SEO-optimized product description in the following format:
+  <!-- Action Buttons -->
+  <button class="btn btn-warning" onclick="testRunTranslation()">TEST RUN (Single Product)</button>
+  <button class="btn btn-success" onclick="runAllProducts()">RUN ALL PRODUCTS</button>
 
-Product Title
-Short Introduction (engaging and keyword-rich)
-Image (suggest an image relevant to the introduction)
-Product Features (concise bullet points highlighting key benefits)
-Image (suggest an image relevant to the product features)
-Call to Action (persuasive and action-driven)`
-)"
-      >
-        Full Format SEO Prompt
-      </button>
-    </div>
-
-    <!-- TONE EXAMPLES -->
-    <div class="tone-examples">
-      <h5>Tone Examples:</h5>
-      <button
-        class="btn btn-sm btn-outline-secondary"
-        onclick="insertPrompt('Use a friendly and approachable tone.')"
-      >
-        Friendly
-      </button>
-      <button
-        class="btn btn-sm btn-outline-secondary"
-        onclick="insertPrompt('Use an elegant, luxury-inspired tone.')"
-      >
-        Luxury
-      </button>
-      <button
-        class="btn btn-sm btn-outline-secondary"
-        onclick="insertPrompt('Use a playful, energetic tone.')"
-      >
-        Playful
-      </button>
-    </div>
-
-    <hr />
-    <!-- ACTION BUTTONS -->
-    <button class="btn btn-warning" onclick="testRunTranslation()">TEST RUN (Single Product)</button>
-    <button class="btn btn-success" onclick="runAllProducts()">RUN ALL PRODUCTS</button>
-
-    <!-- PROGRESS BAR -->
-    <div class="progress" id="bulkProgressBarContainer" style="display: none;">
+  <!-- Progress Bar -->
+  <div class="progress" id="bulkProgressBarContainer" style="display: none;">
       <div class="progress-bar" id="bulkProgressBar" role="progressbar" style="width: 0%;">
-        0%
+          0%
       </div>
-    </div>
   </div>
 </div>
 
-<script>
-////////////////////////////////////////////////////////////////////////////////
-// On page load, fetch collections
-////////////////////////////////////////////////////////////////////////////////
-window.onload = () => {
-  fetchCollections();
-};
 
-/** Insert text into the Description prompt by default. 
- *  Adjust if you want to insert into Title or other fields.
- */
-function insertPrompt(text) {
-  const descBox = document.getElementById("chatgptPromptDesc");
-  descBox.value += (descBox.value ? "\n" : "") + text;
-}
+<!-- Load External JavaScript -->
+<script src="static/script.js"></script>
 
-/** (1) Fetch all collections from backend */
-function fetchCollections() {
-  console.log("🔍 Fetching collections...");
-  fetch("http://127.0.0.1:5003/get_collections")
-    .then(response => response.json())
-    .then(data => {
-      console.log("✅ Collections received:", data);
-      const dd = document.getElementById("collectionDropdown");
-      dd.innerHTML = "";
-      if (data.collections && data.collections.length > 0) {
-        dd.innerHTML = '<option value="" disabled selected>Select a collection</option>';
-        data.collections.forEach(col => {
-          let opt = document.createElement("option");
-          opt.value = col.id;
-          opt.textContent = col.title;
-          opt.title = col.title; // Shows full text on hover
-          dd.appendChild(opt);
-        });
-      } else {
-        console.warn("⚠️ No collections found.");
-        dd.innerHTML = "<option>No collections found</option>";
-      }
-    })
-    .catch(error => {
-      console.error("❌ Error fetching collections:", error);
-    });
-}
-
-function translateVariants() {
-    const collectionId = document.getElementById("collectionDropdown").value;
-    const targetLang = document.getElementById("targetLanguageDropdown").value;
-    const sourceLang = document.getElementById("sourceLanguageDropdown").value; // This could be "auto" or explicit
-
-    fetch("/translate_collection_variants", {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({
-            collection_id: collectionId,
-            target_language: targetLang,
-            source_language: sourceLang
-        })
-    })
-    .then(r => r.json())
-    .then(data => {
-        console.log("✅ Translation response:", data);
-    })
-    .catch(err => console.error("❌ Translation error:", err));
-}
-
-
-/** (2) Fetch products in chosen collection */
-/** (2) Fetch products in chosen collection and their variant options */
-function fetchProductsByCollection() {
-    const collectionId = document.getElementById("collectionDropdown").value;
-    const collectionName = document.getElementById("collectionDropdown").options[document.getElementById("collectionDropdown").selectedIndex].text;
-
-    if (!collectionId) {
-        alert("Please select a collection first.");
-        return;
-    }
-
-    document.getElementById("productLoading").style.display = "block";
-    document.getElementById("collectionInfo").innerText = "Fetching products...";
-
-    fetch("/fetch_products_by_collection", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ collection_id: collectionId, collection_name: collectionName })
-    })
-    .then(r => r.json())
-    .then(data => {
-        document.getElementById("productLoading").style.display = "none";
-
-        if (data.success && data.products && data.products.length > 0) {
-            window.allLoadedProducts = data.products;
-            const productGIDs = data.products.map(product => product.id); // ✅ Fetch Product GIDs dynamically
-
-            displayTestProduct(data.products[0]); 
-            document.getElementById("singleProductCard").style.display = "block";
-            document.getElementById("fieldsCard").style.display = "block";
-
-            document.getElementById("collectionInfo").innerText =
-                `✅ Loaded ${data.product_count} products from "${data.collection_name}".`;
-
-            console.log("✅ Product GIDs fetched:", productGIDs);
-
-            // ✅ New: Fetch variant options immediately after loading products
-            fetch("/fetch_variant_options", {
-                method: "POST",
-                headers: {"Content-Type": "application/json"},
-                body: JSON.stringify({ product_gids: productGIDs })
-            })
-            .then(r => r.json())
-            .then(variantData => {
-                if (variantData.success) {
-                    window.productVariantOptions = variantData.options;
-                    console.log("✅ Loaded product variant options:", window.productVariantOptions);
-                } else {
-                    console.error("⚠️ No variant options found:", variantData.error);
-                }
-            })
-            .catch(err => {
-                console.error("❌ Error fetching variant options:", err);
-            });
-
-        } else {
-            alert("⚠️ No products found in this collection.");
-            document.getElementById("collectionInfo").innerText = "No products found.";
-        }
-    })
-    .catch(err => {
-        console.error("❌ Error fetching products:", err);
-        document.getElementById("productLoading").style.display = "none";
-        document.getElementById("collectionInfo").innerText = "❌ Error loading products.";
-    });
-}
-
-
-/** (3) Upload Google Sheet */
-function uploadGoogleSheet() {
-  const fileInput = document.getElementById("googleSheetUpload").files[0];
-  const imageColumn = document.getElementById("imageColumn").value;
-  const startingRow = parseInt(document.getElementById("startingRow").value, 10);
-
-  if (!fileInput) {
-    alert("No file selected.");
-    return;
-  }
-  if (startingRow < 2) {
-    alert("Starting row must be >= 2.");
-    return;
-  }
-
-  let formData = new FormData();
-  formData.append("file", fileInput);
-  formData.append("image_column", imageColumn);
-  formData.append("starting_row", startingRow);
-
-  fetch("/upload_google_sheet", {
-    method: "POST",
-    body: formData
-  })
-    .then(r => r.json())
-    .then(data => {
-      alert(data.message || "Google sheet processed!");
-      document.getElementById("sheetInfo").innerText = data.message || "";
-    })
-    .catch(err => console.error("Error uploading sheet:", err));
-}
-
-/** (4) Display the first product for test run */
-function displayTestProduct(product) {
-  window.testProduct = product;
-  const infoDiv = document.getElementById("testProductInfo");
-  infoDiv.innerHTML = `
-    <h5>${product.title}</h5>
-    <div>${product.body_html || "(No description)"}</div>
-  `;
-  document.getElementById("testRunOutput").innerHTML = "";
-}
-
-/**
- * (5) Show/hide method options & chatgpt prompt textareas
- */
-document.addEventListener("change", e => {
-  // If user toggles a field
-  if (e.target.matches('input[type="checkbox"][name="fields"]')) {
-    const fieldName = e.target.value;
-    const methodDiv = document.getElementById(`methodOptions${capitalize(fieldName)}`);
-    methodDiv.style.display = e.target.checked ? "block" : "none";
-  }
-  // If user picks a method (google, deepl, chatgpt) for a field
-  if (e.target.matches('input[type="radio"]')) {
-    const { name, value } = e.target; 
-    // e.g. name="titleMethod", value="chatgpt"
-    if (name === "titleMethod") {
-      document.getElementById("chatgptPromptTitle").style.display = value === "chatgpt" ? "block" : "none";
-    } else if (name === "body_htmlMethod") {
-      document.getElementById("chatgptPromptDesc").style.display = value === "chatgpt" ? "block" : "none";
-    } else if (name === "tagsMethod") {
-      document.getElementById("chatgptPromptTags").style.display = value === "chatgpt" ? "block" : "none";
-    } else if (name === "handleMethod") {
-      document.getElementById("chatgptPromptHandle").style.display = value === "chatgpt" ? "block" : "none";
-    } else if (name === "variant_optionsMethod") {
-      document.getElementById("chatgptPromptVariants").style.display = value === "chatgpt" ? "block" : "none";
-    }
-  }
-});
-
-/** (6) Gather the user’s field selections, methods, and ChatGPT prompts */
-function gatherFieldSelections() {
-  const fields = [];
-  document.querySelectorAll('#fieldSelectionForm input[name="fields"]:checked')
-    .forEach(cb => fields.push(cb.value));
-
-  const methods = {};
-
-  // Title
-  if (fields.includes("title")) {
-    methods.title = document.querySelector('input[name="titleMethod"]:checked')?.value || "google";
-  }
-  // Description
-  if (fields.includes("body_html")) {
-    methods.body_html = document.querySelector('input[name="body_htmlMethod"]:checked')?.value || "google";
-  }
-  // Tags
-  if (fields.includes("tags")) {
-    methods.tags = document.querySelector('input[name="tagsMethod"]:checked')?.value || "google";
-  }
-  // Handle
-  if (fields.includes("handle")) {
-    methods.handle = document.querySelector('input[name="handleMethod"]:checked')?.value || "google";
-  }
-  // Variant Options
-  if (fields.includes("variant_options")) {
-    const selectedMethod = document.querySelector('input[name="variant_optionsMethod"]:checked');
-    if (selectedMethod) {
-      methods.variant_options = selectedMethod.value;
-    } else {
-      console.warn("⚠️ No translation method selected for variant options! Defaulting to Google.");
-      methods.variant_options = "google";  // ✅ Fallback
-    }
-  }
-
-
-  // ChatGPT prompts, if user actually picked "chatgpt" for that field
-  let chatgptPromptTitle = "";
-  if (fields.includes("title") && methods.title === "chatgpt") {
-    chatgptPromptTitle = document.getElementById("chatgptPromptTitle").value;
-  }
-  let chatgptPromptDesc = "";
-  if (fields.includes("body_html") && methods.body_html === "chatgpt") {
-    chatgptPromptDesc = document.getElementById("chatgptPromptDesc").value;
-  }
-  let chatgptPromptTags = "";
-  if (fields.includes("tags") && methods.tags === "chatgpt") {
-    chatgptPromptTags = document.getElementById("chatgptPromptTags").value;
-  }
-  let chatgptPromptHandle = "";
-  if (fields.includes("handle") && methods.handle === "chatgpt") {
-    chatgptPromptHandle = document.getElementById("chatgptPromptHandle").value;
-  }
-  let chatgptPromptVariants = "";
-  if (fields.includes("variant_options") && methods.variant_options === "chatgpt") {
-    chatgptPromptVariants = document.getElementById("chatgptPromptVariants").value;
-  }
-
-  return {
-    fields,
-    methods,
-    prompts: {
-      prompt_title: chatgptPromptTitle,
-      prompt_desc: chatgptPromptDesc,
-      prompt_tags: chatgptPromptTags,
-      prompt_handle: chatgptPromptHandle,
-      prompt_variants: chatgptPromptVariants
-    }
-  };
-}
-
-/** (7) Test-run translation on single product */
-function testRunTranslation() {
-  if (!window.testProduct) {
-    alert("No single test product loaded yet.");
-    return;
-  }
-  const { fields, methods, prompts } = gatherFieldSelections();
-  const sourceLang = document.getElementById("sourceLanguage").value;
-  const targetLang = document.getElementById("targetLanguage").value;
-
-  document.getElementById("testRunOutput").innerHTML = "<p>Translating... please wait.</p>";
-
-  fetch("/translate_test_product", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      product_id: window.testProduct.id,
-      fields,
-      field_methods: methods,
-      prompt_title: prompts.prompt_title,
-      prompt_desc: prompts.prompt_desc,
-      prompt_tags: prompts.prompt_tags,
-      prompt_handle: prompts.prompt_handle,
-      prompt_variants: prompts.prompt_variants,
-      source_language: sourceLang,
-      target_language: targetLang
-    })
-  })
-    .then(r => r.json())
-    .then(data => {
-      if (data.success) {
-        // Optionally do front-end post-processing (if you have image placeholders).
-        // e.g. let processedDesc = data.translated_description;
-        // processedDesc = postProcessDescription(processedDesc, window.testProduct);
-        // We'll skip that step here unless you specifically want it.
-
-        displayTestRunResult(data);
-      } else {
-        alert(data.error || "Translation error or no changes made.");
-      }
-    })
-    .catch(err => console.error("Test run error:", err));
-}
-
-/** Show test-run output in #testRunOutput */
-function displayTestRunResult(data) {
-  const outDiv = document.getElementById("testRunOutput");
-  let html = "<h6>Test Run Output:</h6>";
-
-  if (data.translated_title) {
-    html += `<p><strong>Translated Title:</strong> ${data.translated_title}</p>`;
-  }
-  if (data.translated_description) {
-    html += `<p><strong>Translated Description:</strong><br/>${data.translated_description}</p>`;
-  }
-  if (data.translated_tags) {
-    html += `<p><strong>Translated Tags:</strong> ${data.translated_tags}</p>`;
-  }
-  if (data.translated_handle) {
-    html += `<p><strong>Translated Handle:</strong> ${data.translated_handle}</p>`;
-  }
-  if (data.translated_options && data.translated_options.length > 0) {
-    html += `<p><strong>Translated Variant Options:</strong><br/>${JSON.stringify(data.translated_options)}</p>`;
-  }
-
-  outDiv.innerHTML = html;
-}
-
-/** (8) Bulk translation on all loaded products */
-function runAllProducts() {
-    if (!window.allLoadedProducts || window.allLoadedProducts.length === 0) {
-        alert("No products loaded for bulk run.");
-        return;
-    }
-    const { fields, methods, prompts } = gatherFieldSelections();
-    const sourceLang = document.getElementById("sourceLanguage").value;
-    const targetLang = document.getElementById("targetLanguage").value;
-
-    const products = window.allLoadedProducts;
-    const total = products.length;
-    let completed = 0;
-
-    document.getElementById("bulkProgressBarContainer").style.display = "block";
-    updateProgress(0);
-
-    function translateNext(i) {
-        if (i >= total) {
-            alert(`✅ All ${total} products successfully translated!`);
-            return;
-        }
-        const product = products[i];
-
-        fetch("/translate_test_product", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                product_id: product.id,
-                fields,
-                field_methods: methods,
-                prompt_title: prompts.prompt_title,
-                prompt_desc: prompts.prompt_desc,
-                prompt_tags: prompts.prompt_tags,
-                prompt_handle: prompts.prompt_handle,
-                prompt_variants: prompts.prompt_variants,
-                source_language: sourceLang,
-                target_language: targetLang
-            })
-        })
-        .then(r => r.json())
-        .then(() => {
-            completed++;
-            const percent = Math.round((completed / total) * 100);
-            updateProgress(percent);
-            translateNext(i + 1);
-        })
-        .catch(err => {
-            console.error("Error translating product:", product.id, err);
-            completed++;
-            const percent = Math.round((completed / total) * 100);
-            updateProgress(percent);
-            translateNext(i + 1);
-        });
-    }
-    translateNext(0);
-}
-
-/** Update the progress bar */
-/** ✅ Single function to update the progress bar properly */
-function updateProgress(percent) {
-    const progressBar = document.getElementById("bulkProgressBar");
-    const progressContainer = document.getElementById("bulkProgressBarContainer");
-
-    if (percent === 0) {
-        progressContainer.style.display = "block"; // Show progress bar at start
-    }
-    
-    progressBar.style.width = percent + "%";
-    progressBar.textContent = percent + "%";
-
-    if (percent === 100) {
-        setTimeout(() => {
-            progressContainer.style.display = "none"; // Hide when complete
-        }, 2000);
-    }
-}
-
-
-/** Helper: capitalize first letter */
-function capitalize(str) {
-  return str.charAt(0).toUpperCase() + str.slice(1);
-}
-
-document.addEventListener("DOMContentLoaded", function () {
-    document.getElementById("fetchProductsByCollection")?.addEventListener("click", fetchProductsByCollection);
-});
-
-
-</script>
 </body>
 </html>
+
