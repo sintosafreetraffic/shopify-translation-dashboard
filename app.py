@@ -2,6 +2,7 @@ import os
 import sys
 from dotenv import load_dotenv
 import traceback
+from variants_utils import clean_translated_text
 load_dotenv()
 
 print("SHOPIFY_STORE_URL:", os.getenv("SHOPIFY_STORE_URL"))
@@ -24,6 +25,19 @@ from variants_utils import get_product_option_values, update_product_option_valu
 from bs4 import BeautifulSoup  # Add this here
 from variants_utils import get_predefined_translation  # ✅ Import the function
 
+def sanitize_shopify_product(product):
+    # Clean options
+    for option in product.get("options", []):
+        option["name"] = clean_translated_text(option["name"])
+        option["values"] = [clean_translated_text(v) for v in option.get("values", [])]
+
+    # Clean variants
+    for variant in product.get("variants", []):
+        for key in ["option1", "option2", "option3"]:
+            if key in variant:
+                variant[key] = clean_translated_text(variant[key])
+
+    return product
 
 # Define clean_html function here
 def clean_html(html):
@@ -875,6 +889,8 @@ def translate_test_product():
         "variants": translated_variants  # ✅ Ensure variants reflect translated options
     }
 }
+            put_payload["product"] = sanitize_shopify_product(put_payload["product"])
+
         # ✅ Log final payload before sending
             logging.info(f"📦 Final Shopify PUT Payload:\n{json.dumps(put_payload, indent=2)[:1000]}")
             url_put = f"https://{SHOPIFY_STORE_URL}/admin/api/2023-04/products/{product_id}.json"

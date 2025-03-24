@@ -4,11 +4,14 @@ from translation import google_translate
 from translation import deepl_translate
 from translation import apply_translation_method
 import json
+import html
 import requests
 import os
 from langdetect import detect
 from deep_translator import GoogleTranslator
 from deep_translator import DeeplTranslator
+
+logging.basicConfig(level=logging.INFO)
 
 
 SHOPIFY_STORE_URL = os.getenv("SHOPIFY_STORE_URL")
@@ -21,6 +24,23 @@ HEADERS = {
 }
 
 logger = logging.getLogger(__name__)
+
+def clean_translated_text(text: str) -> str:
+    """
+    Clean up HTML-escaped characters from a translated string.
+
+    Args:
+        text (str): The translated string (possibly with HTML entities)
+
+    Returns:
+        str: Unescaped, cleaned string
+    """
+    if not text:
+        return text
+
+    text = html.unescape(text)       # Handles &amp;, &lt;, &gt;, etc.
+    text = text.strip()              # Remove leading/trailing whitespace
+    return text
 
 def get_product_option_values(product_gid):
     query = """
@@ -37,10 +57,21 @@ def get_product_option_values(product_gid):
 
     variables = {"productId": product_gid}  # ✅ Ensure it's a global ID format
 
-    response = requests.post(GRAPHQL_URL, headers=HEADERS, json={
-        "query": query,
-        "variables": variables
-    })
+    payload = {
+    "query": query,
+    "variables": variables
+}
+
+    logging.info("📦 Final Payload Sent to Shopify:")
+    logging.info(json.dumps(payload, indent=2, ensure_ascii=False))  # just for log output
+    response = requests.post(
+    GRAPHQL_URL,
+    headers=HEADERS,
+    data=json.dumps(payload, ensure_ascii=False),  # ✅ key change here
+)
+
+
+
     data = response.json()
 
     if "errors" in data or not data.get("data", {}).get("product"):
@@ -48,7 +79,6 @@ def get_product_option_values(product_gid):
         return None
 
     return data["data"]["product"]["options"]
-
 
 COLOR_NAME_MAP = {
     "Black": {"de": "Schwarz", "es": "Negro", "fr": "Noir", "da": "Sort"},
@@ -128,6 +158,9 @@ def detect_language(text):
 def update_product_option_values(product_gid, option, target_language, source_language="auto", translation_method="google"):
     translated_values = []
     
+    logging.info(f"🔄 [START] Translating Option: {option['name']} for Product ID: {product_gid}")
+    logging.debug(f"📦 Raw Option JSON: {json.dumps(option, indent=2, ensure_ascii=False)}")
+
     logging.info(f"🔄 Translating Option: {option['name']} for Product ID: {product_gid}")
 
     # ✅ Skip known sizes (S, M, L) from translation
@@ -136,14 +169,20 @@ def update_product_option_values(product_gid, option, target_language, source_la
     original_option_name = option["name"].strip()
 
     # ✅ Translate Option Name
-    translated_option_name = apply_translation_method(
+    translated_option_name = clean_translated_text(apply_translation_method(
         original_text=original_option_name,
         method=translation_method,
         custom_prompt="",
         source_lang=source_language,
         target_lang=target_language
-    )
+    ))
+    translated_option_name = clean_translated_text(translated_option_name)  # SECOND cleanup!
 
+
+    logger.info(f"🔍 [DEBUG] Translated Option Name (before second cleaning): '{translated_option_name}'")
+
+    logging.info(f"🌍 Final Option Name: '{original_option_name}' → '{translated_option_name}'")
+        # 🔧 Fix for HTML entities in the option name too (e.g. "Pink &amp; White")
     logging.info(f"🌍 Translated Option Name: '{original_option_name}' → '{translated_option_name}'")
 
     for value in option["optionValues"]:
@@ -165,46 +204,71 @@ def update_product_option_values(product_gid, option, target_language, source_la
             # 🚀 No predefined match, use AI translation
             logging.info(f"🚀 No predefined match for '{original_text}', using {translation_method} translation...")
 
-            translated_name = apply_translation_method(
+            translated_name = clean_translated_text(apply_translation_method(
                 original_text=original_text,
                 method=translation_method,
                 custom_prompt="",
                 source_lang=source_language,
                 target_lang=target_language
-            )
+            ))
+            logger.info(f"🔍 [DEBUG] Translated (before cleaning again): '{translated_name}'")
+            translated_name = clean_translated_text(translated_option_name)  # SECOND cleanup!
+
+
 
             logging.info(f"🌍 AI Translated '{original_text}' → '{translated_name}'")
 
         # ✅ Append final translation to list
-        translated_values.append({"id": value["id"], "name": translated_name})
+        clean_name = clean_translated_text(translated_name)
+        if clean_name != translated_name:
+            logging.warning(f"🧼 HTML entity cleanup: '{translated_name}' → '{clean_name}'")
+
+        logging.info(f"✅ Final Value: '{original_text}' → '{clean_name}'")    
+        translated_values.append({"id": value["id"], "name": clean_name})
 
     # ✅ Final debug log to verify translations
     logging.info(f"📦 Final Translated Option Name: {translated_option_name}")
     logging.info(f"📦 Final Translated Values: {translated_values}")
 
     # ✅ Shopify GraphQL mutation to update product options
-    # ✅ Shopify GraphQL mutation for updating product options
     mutation = """
     mutation updateProductOption($productId: ID!, $option: OptionUpdateInput!, $optionValuesToUpdate: [OptionValueUpdateInput!]!) {
-    productOptionUpdate(productId: $productId, option: $option, optionValuesToUpdate: $optionValuesToUpdate) {
+      productOptionUpdate(productId: $productId, option: $option, optionValuesToUpdate: $optionValuesToUpdate) {
         userErrors { field message }
-    }
+      }
     }
     """
 
     variables = {
         "productId": product_gid,
         "option": {"id": option["id"], "name": translated_option_name},
-        "optionValuesToUpdate": [{"id": val["id"], "name": val["name"]} for val in translated_values],
+        "optionValuesToUpdate": translated_values,
     }
 
-    response = requests.post(GRAPHQL_URL, headers=HEADERS, json={"query": mutation, "variables": variables})
+    payload = {
+        "query": mutation,
+        "variables": variables
+    }
+    logging.info("📦 Final Payload Sent to Shopify:")
+    logging.info(json.dumps(payload, indent=2, ensure_ascii=False))  # just for log output
+    response = requests.post(
+    GRAPHQL_URL,
+    headers=HEADERS,
+    data=json.dumps(payload, ensure_ascii=False),  # ✅ key change here
+)
+
+
+
     data = response.json()
 
-    # ✅ Log Shopify Response
+        # 🔍 Log the full Shopify response
+    logging.info(f"📤 Shopify GraphQL Mutation Sent: {json.dumps(variables, indent=2)}")
+    logging.info(f"📥 Shopify Response: {json.dumps(data, indent=2)}")
+
+
     if "errors" in data or data["data"]["productOptionUpdate"]["userErrors"]:
-        logging.error(f"❌ Shopify GraphQL Error: {data}")
+        logging.error(f"❌ Error updating options: {data}")
         return False
     else:
-        logging.info(f"✅ Successfully updated Shopify product options for {product_gid}")
+        logging.info(f"✅ Successfully updated options for {product_gid}")
         return True
