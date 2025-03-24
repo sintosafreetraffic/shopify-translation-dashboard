@@ -332,6 +332,7 @@ function runAllProducts() {
 
   const titlePrompt = document.getElementById("titlePrompt").value || "";
   const descPrompt = document.getElementById("descPrompt").value || "";
+  const variantsPrompt = document.getElementById("variantsPrompt")?.value || ""; // ✅ NEW
   
   fetch(`${API_BASE_URL}/translate_collection_fields`, {
       method: "POST",
@@ -344,7 +345,8 @@ function runAllProducts() {
   
           // ✅ Pass the custom prompts
           prompt_title: titlePrompt,
-          prompt_desc: descPrompt
+          prompt_desc: descPrompt,
+          prompt_variants: variantsPrompt
       })
   })
   
