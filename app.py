@@ -1,26 +1,56 @@
 import os
 import sys
 from dotenv import load_dotenv
+load_dotenv()
 import traceback
 from variants_utils import clean_translated_text
 from variants_utils import get_product_option_values, update_product_option_values
 
-load_dotenv()
 
 print("SHOPIFY_STORE_URL:", os.getenv("SHOPIFY_STORE_URL"))
-print("SHOPIFY_API_KEY:", os.getenv("SHOPIFY_API_KEY"))
+
 
 sys.path.append(os.path.abspath(os.path.dirname(__file__)))  # Ensure current directory is in path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))  # Add parent directory
 
+# Debug code - add this before your imports
+print("ACTUAL TRANSLATION.PY PATH:", os.path.join(os.path.dirname(__file__), "translation.py"))
+print("FILE EXISTS:", os.path.exists(os.path.join(os.path.dirname(__file__), "translation.py")))
+
 print("PYTHONPATH:", sys.path)  # Debugging output
+
+
+translation_path = os.path.join(os.path.dirname(__file__), "translation.py")
+
+print(f"TRANSLATION.PY ACTUAL PATH: {translation_path}")
+print(f"FILE EXISTS: {os.path.exists(translation_path)}")
+
 
 import sqlite3
 import requests
 import json
 import logging
 import re  # For simple HTML pattern matching
-from translation import chatgpt_translate, google_translate, deepl_translate
+import importlib.util
+import sys
+
+# 1. Get absolute path to translation.py
+translation_path = os.path.join(os.path.dirname(__file__), "translation.py")
+
+# 2. Manually load the module
+spec = importlib.util.spec_from_file_location("translation", translation_path)
+translation = importlib.util.module_from_spec(spec)
+sys.modules["translation"] = translation
+spec.loader.exec_module(translation)
+
+# 3. Import functions directly from the loaded module
+chatgpt_translate = translation.chatgpt_translate
+google_translate = translation.google_translate 
+deepl_translate = translation.deepl_translate
+deepseek_translate = translation.deepseek_translate
+deepseek_translate_title = translation.deepseek_translate_title
+
+print("✅ Successfully loaded all translation functions")
 from flask import Flask, render_template, request, jsonify
 from flask_cors import CORS
 from variants_utils import get_product_option_values, update_product_option_values
@@ -52,20 +82,78 @@ def clean_html(html):
 # If your modules are located one directory up
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+def process_google_sheet(file, image_column, starting_row):
+    """
+    Process an uploaded Google Sheet (or CSV/XLSX) file containing product data.
+    Returns the number of products processed.
+    """
+    try:
+        # Determine file type
+        filename = file.filename.lower()
+        
+        if filename.endswith('.csv'):
+            # Process CSV file
+            import csv
+            data = file.read().decode('utf-8').splitlines()
+            reader = csv.DictReader(data)
+            products = list(reader)
+            
+        elif filename.endswith(('.xls', '.xlsx')):
+            # Process Excel file
+            import pandas as pd
+            if filename.endswith('.xlsx'):
+                df = pd.read_excel(file, engine='openpyxl')
+            else:
+                df = pd.read_excel(file)
+            products = df.to_dict('records')
+            
+        else:
+            raise ValueError("Unsupported file format. Please upload CSV or Excel file.")
 
+        # Process each product starting from the specified row
+        processed_count = 0
+        for i, product in enumerate(products[starting_row-2:], start=starting_row):  # -2 because header is row 1 and list is 0-indexed
+            try:
+                # Extract relevant data - adjust these based on your sheet structure
+                product_id = product.get('Product ID', '')
+                title = product.get('Title', '')
+                description = product.get('Description', '')
+                image_url = product.get(image_column, '')  # Use the specified image column
+                
+                if not product_id:
+                    continue
+                    
+                # Store in database
+                with sqlite3.connect(DATABASE) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        INSERT OR REPLACE INTO translations 
+                        (product_id, product_title, product_description, image_url, batch, status)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """, (product_id, title, description, image_url, 'google_sheet', 'Pending'))
+                    
+                processed_count += 1
+                
+            except Exception as e:
+                logger.error(f"Error processing row {i}: {str(e)}")
+                continue
+                
+        return processed_count
+        
+    except Exception as e:
+        logger.exception("Error processing Google Sheet:")
+        raise
+    
 
 # Custom modules
 from shopify_api import fetch_product_by_id, fetch_products_by_collection, update_product_translation
 from translation import chatgpt_translate, google_translate, deepl_translate, chatgpt_translate_title  # Extend as needed
-from google_sheets import process_google_sheet
 
 # ✅ Global variable to track translation progress
 translation_progress = {
     "total": 0,
     "completed": 0
 }
-
-
 # ------------------------------ #
 # Load Environment Variables
 # ------------------------------ #
@@ -90,6 +178,13 @@ logger = logging.getLogger(__name__)
 # ------------------------------ #
 app = Flask(__name__, template_folder="templates")
 CORS(app)  
+
+# ✅ Only now import/export blueprint and register
+from export_routes import export_bp
+app.register_blueprint(export_bp)
+
+# Ensure the current directory is in the Python module search path
+sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 
 @app.route('/shopify-test')
 def test_shopify_api():
@@ -149,7 +244,7 @@ def post_process_description(original_html, new_html, method, product_data=None,
     """
     Post-process a translated product description:
     - ChatGPT: Full formatting (title, intro, bullet points, images, CTA).
-    - Other methods: Only inject two images (first after introduction, second after bullet points).
+    - DeepSeek/Google/DeepL: Inject two product images.
     """
     try:
         logging.debug("[post_process_description] Starting post-processing.")
@@ -159,8 +254,9 @@ def post_process_description(original_html, new_html, method, product_data=None,
         image1_url = images[0].get("src") if len(images) > 0 else ""
         image2_url = images[1].get("src") if len(images) > 1 else ""
 
+        method = method.lower()
 
-        if method.lower() == "chatgpt":
+        if method == "chatgpt":
             # Full formatting for ChatGPT method
             parsed = _parse_chatgpt_description(new_html)
             labels = _get_localized_labels(target_lang)
@@ -204,7 +300,7 @@ def post_process_description(original_html, new_html, method, product_data=None,
             logging.info("✅ [post_process_description] Successfully constructed ChatGPT-formatted HTML.")
             return "\n".join(final_html_parts).strip()
 
-        else:
+        elif method in ["deepseek", "google", "deepl"]:
             logging.info(f"[post_process_description] Injecting images into HTML for method '{method}'.")
 
             # Parse and clean HTML
@@ -238,7 +334,7 @@ def post_process_description(original_html, new_html, method, product_data=None,
                     blocks = main_container.find_all(tag)
                     if blocks:
                         last_block = blocks[-1]
-                        break  # stop at first type found in reverse priority
+                        break
 
                 # Insert second image before that block
                 if last_block:
@@ -255,28 +351,29 @@ def post_process_description(original_html, new_html, method, product_data=None,
                     soup.append(img_div_2)
                     logging.warning("⚠️ No final block found — inserted second image at end.")
 
-                        # Fix all layout-divs with Shopify column classes
+            # Shopify layout fixes
             for grid_div in soup.find_all('div', class_=lambda x: x and 'grid__item' in x):
-                # Remove Shopify column classes (they mess with layout)
                 grid_div['class'] = ['grid__item']
-                # Apply inline styles to ensure full width & center
                 grid_div['style'] = "width:100%; max-width:800px; margin: 0 auto; text-align:center;"
-        
 
-            # Final HTML cleanup
             final_inner_html = str(soup)
-
-            # 🛠 Fix rare layout issue (Shopify grid forcing half width)
             final_inner_html = final_inner_html.replace(
                 'class="grid__item large--six-twelfths medium--six-twelfths"',
                 'class="grid__item" style="width:100%; max-width:800px; margin: 0 auto; text-align:center;"'
             )
 
-            # ✅ Wrap everything in a centered container
-            final_wrapped_html = f'<div style="text-align: center; margin: 0 auto; max-width: 800px;">{final_inner_html}</div>'
+            # Wrap if not already wrapped
+            if 'max-width:800px' not in final_inner_html:
+                final_wrapped_html = f'<div style="text-align: center; margin: 0 auto; max-width: 800px;">{final_inner_html}</div>'
+            else:
+                final_wrapped_html = final_inner_html
 
             logging.info(f"🔥 Final HTML sent to Shopify:\n{final_wrapped_html[:1000]}...")
             return final_wrapped_html.strip()
+
+        else:
+            logging.warning(f"⚠️ [post_process_description] Unknown method '{method}' — returning raw HTML.")
+            return new_html
 
     except Exception as e:
         logging.exception(f"❌ [post_process_description] Exception occurred: {e}")
@@ -413,6 +510,11 @@ def apply_translation_method(
     field_type=None,
     description=None
 ):
+
+    if isinstance(method, dict):
+        custom_prompt = method.get("prompt", "")
+        method = method.get("method", "google")  # Fallback if missing
+
     logging.info("🔁 [apply_translation_method] START:")
     logging.info(f"   → method: {method}")
     logging.info(f"   → source_lang: {source_lang}")
@@ -426,11 +528,32 @@ def apply_translation_method(
 
     method_lower = method.lower()
 
+    
+
     try:
+        # Handle ChatGPT and DeepSeek first (direct returns)
         if method_lower == "chatgpt":
             logging.info("🤖 Using ChatGPT — calling once for full HTML...")
             return chatgpt_translate(original_text, custom_prompt, target_lang, field_type, product_title)
+        
+        if method_lower == "deepseek":
+            if source_lang.lower() == "auto":
+                try:
+                    from langdetect import detect
+                    source_lang = detect(original_text)
+                    logging.info(f"🌍 Auto-detected source language: {source_lang}")
+                except Exception as e:
+                    logging.warning(f"⚠️ Language detection failed: {e}")
+                    source_lang = "en"
 
+            logging.info(f"🚀 Using DeepSeek translation — source_lang: {source_lang}, target_lang: {target_lang}")
+            return deepseek_translate(
+                original_text,
+                custom_prompt=custom_prompt,
+                target_language=target_lang
+            )
+
+        # Existing Google/DeepL handling below
         # For Google or DeepL, do language detection if needed
         if method_lower in ["google", "deepl"] and source_lang.lower() == "auto" and description:
             try:
@@ -491,6 +614,13 @@ def apply_translation_method(
 # Flask Routes
 # ------------------------------ #
 
+def ensure_https(url):
+    url = url.strip()
+    if not url.startswith("http://") and not url.startswith("https://"):
+        return f"https://{url}"
+    return url
+
+
 @app.route("/")
 def index():
     """Render the main translation dashboard UI (index.html)."""
@@ -502,8 +632,9 @@ def get_collections():
     """
     Fetch both smart and custom collections from Shopify for the dropdown.
     """
-    url_custom = f"https://{SHOPIFY_STORE_URL}/admin/api/2023-04/custom_collections.json"
-    url_smart = f"https://{SHOPIFY_STORE_URL}/admin/api/2023-04/smart_collections.json"
+    url_custom = f"{ensure_https(SHOPIFY_STORE_URL)}/admin/api/2023-04/custom_collections.json"
+    url_smart = f"{ensure_https(SHOPIFY_STORE_URL)}/admin/api/2023-04/smart_collections.json"
+
 
     custom_resp = shopify_request("GET", url_custom)
     smart_resp = shopify_request("GET", url_smart)
@@ -626,7 +757,6 @@ def clean_title_output(title):
     """
     return title.strip().strip('"').strip("'")
 
-
 # --- Translate Single Product ---
 @app.route("/translate_test_product", methods=["POST"])
 def translate_test_product():
@@ -680,26 +810,42 @@ def translate_test_product():
 
         # --- TITLE ---
         if "title" in fields:
-            chosen_method = methods.get("title", "google")
-            logging.info("🚀 [chatgpt_translate] Sending request to ChatGPT for description...- translate test product")
+            title_field_config = methods.get("title", {})
+            chosen_method = title_field_config.get("method", "google")
+            prompt = title_field_config.get("prompt", "")
 
-            # If using ChatGPT for the title:
+            if isinstance(title_field_config, dict):
+                chosen_method = title_field_config.get("method", "google")
+                prompt = title_field_config.get("prompt", "")
+            else:
+                chosen_method = title_field_config
+                prompt = ""
+
+            logging.info(f"🚀 Translating Title using: {chosen_method}")
+
             if chosen_method == "chatgpt":
                 title = chatgpt_translate_title(
                     product_data.get("title", ""),
-                    custom_prompt=prompt_title,
+                    custom_prompt=prompt,
                     target_language=target_lang
                 )
+
+            elif chosen_method == "deepseek":
+                title = deepseek_translate_title(
+                    product_data.get("title", ""),
+                    target_language=target_lang
+                )
+
             else:
-                # Pass body_html as `description`:
+                # Google, DeepL, fallback
                 title = apply_translation_method(
                     original_text=product_data.get("title", ""),
                     method=chosen_method,
-                    custom_prompt=prompt_title,
+                    custom_prompt=prompt,
                     source_lang=source_lang,
                     target_lang=target_lang,
-                    description=product_data.get("body_html", "")  # <-- ADDED
-        )
+                    description=product_data.get("body_html", "")  # for lang detection
+                )
             # 🔥 Function to clean and fix abrupt cuts
             def clean_title_output(title):
                 """
@@ -738,10 +884,6 @@ def translate_test_product():
 
             updated_data["title"] = title  # Store cleaned title
 
-
-
-
-
         # --- DESCRIPTION (body_html) ---
         if "body_html" in fields:
             chosen_method = methods.get("body_html", "google")
@@ -749,6 +891,13 @@ def translate_test_product():
             original_html = product_data.get("body_html", "") or ""
 
             logger.info("🧪 Calling apply_transalation_method")
+
+            # Inside description block
+
+            if isinstance(chosen_method, dict):  # 🔥 FIX
+                prompt_desc = chosen_method.get("prompt", "")
+                chosen_method = chosen_method.get("method", "google")
+
 
             new_desc = apply_translation_method(
                 original_text=original_html,
@@ -822,7 +971,7 @@ def translate_test_product():
                 logging.info(f"✅ Translated Option Name: {original_option_name} → {translated_name}")
 
                 new_values = []
-                for value in opt.get("values", []):
+                for value in opt.get("values", []): 
                     logging.info(f"🔄 Translating Option Value: {value}")  # ✅ Log before translation
 
                     # ✅ Check if predefined translation exists
@@ -1298,6 +1447,7 @@ def get_translation_progress():
         "total": translation_progress["total"],
         "completed": translation_progress["completed"]
     })
+
 # ------------------------------ #
 
 # --- Utility: Log Translation ---

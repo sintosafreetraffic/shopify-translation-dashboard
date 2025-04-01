@@ -1,8 +1,8 @@
 # variants_utils.py (corrected with global ID handling and translation)
 import logging
-from translation import google_translate
-from translation import deepl_translate
-from translation import apply_translation_method
+from export_translation import google_translate
+from export_translation import deepl_translate
+from export_translation import apply_translation_method
 import json
 import html
 import requests
@@ -50,10 +50,6 @@ def clean_translated_text(text: str) -> str:
     return text
 
 def get_product_option_values(product_gid, shopify_store_url=None, shopify_api_key=None):
-    if shopify_store_url is None:
-        shopify_store_url = os.getenv("SHOPIFY_STORE_URL")
-    if shopify_api_key is None:
-        shopify_api_key = os.getenv("SHOPIFY_API_KEY")
 
     graphql_url = f"{shopify_store_url}/admin/api/2023-04/graphql.json"
     headers = {
@@ -225,10 +221,6 @@ def detect_language(text):
 
 # Update product option values with translations
 def update_product_option_values(product_gid, option, target_language, source_language="auto", translation_method="google", shopify_store_url=None, shopify_api_key=None):
-    if shopify_store_url is None:
-        shopify_store_url = os.getenv("SHOPIFY_STORE_URL")
-    if shopify_api_key is None:
-        shopify_api_key = os.getenv("SHOPIFY_API_KEY")
     translated_values = []
     
     logging.info(f"🔄 [START] Translating Option: {option['name']} for Product ID: {product_gid}")
@@ -237,7 +229,7 @@ def update_product_option_values(product_gid, option, target_language, source_la
     logging.info(f"🔄 Translating Option: {option['name']} for Product ID: {product_gid}")
 
     # ✅ Skip known sizes (S, M, L) from translation
-    KNOWN_SIZES = {"XXS", "XS", "S", "M", "L", "XL", "XXL", "XXXL", "XXXXL"}
+    KNOWN_SIZES = {"XXS", "XS", "S", "M", "L", "XL", "XXL", "XXXL", "XXXXL","2XL","3XL","4XL"}
 
     original_option_name = option["name"].strip()
 

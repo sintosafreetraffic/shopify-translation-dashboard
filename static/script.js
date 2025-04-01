@@ -4,13 +4,26 @@
 
 const API_BASE_URL = `${window.location.protocol}//${window.location.host}`;
 
-
 console.log("Using API_BASE_URL:", API_BASE_URL);
 
 // Ensure script runs when page loads
 document.addEventListener("DOMContentLoaded", () => {
     fetchCollections();
+    initializeMethodHandlers();
 });
+
+function initializeMethodHandlers() {
+    document.querySelectorAll('.field-method').forEach(select => {
+        select.addEventListener('change', function () {
+            document.querySelectorAll('.field-method').forEach(otherSelect => {
+                const container = otherSelect.closest('.mb-3').querySelector('.method-prompt');
+                const value = otherSelect.value;
+                const isAI = ['deepseek', 'chatgpt'].includes(value);
+                container.style.display = isAI ? 'block' : 'none';
+            });
+        });
+    });
+}
 
 // Fetch collections from API and populate dropdown
 function fetchCollections() {
@@ -47,8 +60,6 @@ function fetchCollections() {
         })
         .catch(error => console.error("Error fetching collections:", error));
 }
-
-
 // Fetch products by collection
 window.fetchProductsByCollection = function () {
   const collectionId = document.getElementById("collectionDropdown")?.value;
@@ -146,28 +157,36 @@ function displayProducts(products) {
   productContainer.appendChild(productCard);
 }
 
-// Get selected translation fields
 // Get selected translation fields and their methods
 function getSelectedFieldsAndMethods() {
-  const selectedFields = {};
+    const selectedFields = {};
 
-  // Check if title field is selected and get its method
-  if (document.getElementById("titleField").checked) {
-      selectedFields["title"] = document.getElementById("titleMethod").value;
-  }
+    // Title field
+    if (document.getElementById("titleField").checked) {
+        selectedFields.title = {
+            method: document.getElementById("titleMethod").value,
+            prompt: document.getElementById("titlePrompt").value
+        };
+    }
 
-  // Check if description field is selected and get its method
-  if (document.getElementById("descField").checked) {
-      selectedFields["body_html"] = document.getElementById("descMethod").value;
-  }
+    // Description field
+    if (document.getElementById("descField").checked) {
+        selectedFields.body_html = {
+            method: document.getElementById("descMethod").value,
+            prompt: document.getElementById("descPrompt").value
+        };
+    }
 
-  if (document.getElementById("variantsField")?.checked) {
-      selectedFields["variant_options"] = document.getElementById("variantsMethod")?.value || "google";  // ✅ Fix key name
-}
+    // Variants field
+    if (document.getElementById("variantsField")?.checked) {
+        selectedFields.variant_options = {
+            method: document.getElementById("variantsMethod").value,
+            prompt: document.getElementById("variantsPrompt").value
+        };
+    }
 
-  console.log("Selected Fields:", selectedFields); // ✅ Debugging output
-  return selectedFields;
-
+    console.log("Selected Fields:", selectedFields);
+    return selectedFields;
 }
 
 // Get selected translation method
@@ -284,84 +303,71 @@ function testRunTranslation() {
 }
 
 function runAllProducts() {
-  const selectedFieldsAndMethods = getSelectedFieldsAndMethods();
+    const selectedFields = getSelectedFieldsAndMethods();
+    const fieldMethods = Object.fromEntries(
+        Object.entries(selectedFields).map(([field, config]) => [field, config.method])
+    );
 
-  console.log("Running bulk translation...");
-  console.log("Selected Fields & Methods:", selectedFieldsAndMethods);
+    console.log("Running bulk translation...", selectedFields);
 
-
-  if (Object.keys(selectedFieldsAndMethods).length === 0) {
-      alert("Please select at least one field to translate.");
-      return;
-  }
-
-  alert(`Bulk Translation Started!\n` +
-      Object.entries(selectedFieldsAndMethods).map(([field, method]) =>
-          `${field}: ${method}`).join("\n")
-  );
-
-  // ✅ Show progress UI
-  const progressContainer = document.getElementById("bulkProgressContainer");
-  const progressBar = document.getElementById("bulkProgressBar");
-  const progressLabel = document.getElementById("bulkProgressLabel");
-  progressContainer.style.display = "block";
-  progressBar.style.width = "0%";
-  progressLabel.innerText = "0%";
-
-  // ✅ Start polling for progress
-  function checkBulkProgress() {
-      fetch(`${API_BASE_URL}/translation_progress`)
-          .then(response => response.json())
-          .then(data => {
-              const percent = Math.round((data.completed / data.total) * 100);
-              progressBar.style.width = `${percent}%`;
-              progressLabel.innerText = `${percent}%`;
-
-              if (percent < 100) {
-                  setTimeout(checkBulkProgress, 1000);
-              } else {
-                  progressLabel.innerText = "✅ Done!";
-              }
-          })
-          .catch(error => {
-              console.error("❌ Failed to get progress:", error);
-          });
-  }
-
-  checkBulkProgress(); // start progress tracking
-
-  const titlePrompt = document.getElementById("titlePrompt").value || "";
-  const descPrompt = document.getElementById("descPrompt").value || "";
-  const variantsPrompt = document.getElementById("variantsPrompt")?.value || ""; // ✅ NEW
-  
-  fetch(`${API_BASE_URL}/translate_collection_fields`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-          collection_id: document.getElementById("collectionDropdown").value,
-          fields: Object.keys(selectedFieldsAndMethods),
-          field_methods: selectedFieldsAndMethods,
-          target_language: document.getElementById("targetLanguage").value,
-  
-          // ✅ Pass the custom prompts
-          prompt_title: titlePrompt,
-          prompt_desc: descPrompt,
-          prompt_variants: variantsPrompt
-      })
-  })
-  
-.then(res => res.json())
-.then(data => {
-    console.log("✅ Bulk Translation Response:", data);
-    if (!data.success) {
-        alert("❌ Bulk translation failed: " + (data.error || "Unknown error"));
+    if (Object.keys(selectedFields).length === 0) {
+        alert("Please select at least one field to translate.");
+        return;
     }
-})
-.catch(error => {
-    console.error("❌ Error during bulk translation:", error);
-    alert("❌ Error during bulk translation: " + error.message);
-});
 
+    // Show progress UI
+    const progressContainer = document.getElementById("bulkProgressContainer");
+    const progressBar = document.getElementById("bulkProgressBar");
+    const progressLabel = document.getElementById("bulkProgressLabel");
+    progressContainer.style.display = "block";
+    progressBar.style.width = "0%";
+    progressLabel.innerText = "0%";
+
+   // Start progress polling
+   function checkBulkProgress() {
+    fetch(`${API_BASE_URL}/translation_progress`)
+        .then(response => response.json())
+        .then(data => {
+            const percent = Math.round((data.completed / data.total) * 100);
+            progressBar.style.width = `${percent}%`;
+            progressLabel.innerText = `${percent}%`;
+
+            if (percent < 100) {
+                setTimeout(checkBulkProgress, 1000);
+            } else {
+                progressLabel.innerText = "✅ Done!";
+            }
+        })
+        .catch(console.error);
+}
+
+    // Prepare prompts
+    const prompts = Object.fromEntries(
+        Object.entries(selectedFields).map(([field, config]) => [field, config.prompt])
+    );
+  
+    fetch(`${API_BASE_URL}/translate_collection_fields`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            collection_id: document.getElementById("collectionDropdown").value,
+            fields: Object.keys(selectedFields),
+            field_methods: fieldMethods,
+            target_language: document.getElementById("targetLanguage").value,
+            prompts: prompts
+        })
+    })
+    .then(res => res.json())
+    .then(data => {
+        if (!data.success) {
+            throw new Error(data.error || "Unknown error");
+        }
+        console.log("Bulk translation completed:", data);
+    })
+    .catch(error => {
+        console.error("Bulk translation error:", error);
+        alert(`❌ Error: ${error.message}`);
+    });
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -369,7 +375,26 @@ function runAllProducts() {
 ////////////////////////////////////////////////////////////////////////////////
 
 document.addEventListener("DOMContentLoaded", function () {
-    console.log("🔄 Initializing Buyer Persona & ChatGPT Prompt functionality...");
+    // Persona button handler
+    document.querySelectorAll(".persona-btn").forEach(button => {
+        button.addEventListener("click", function () {
+            const selectedPrompt = this.dataset.prompt;
+            const targetField = this.dataset.field; // Assume buttons have data-field attribute
+            
+            if (targetField === 'title') {
+                document.getElementById("titlePrompt").value = selectedPrompt;
+            } 
+            else if (targetField === 'desc') {
+                document.getElementById("descPrompt").value = selectedPrompt;
+            }
+            else if (targetField === 'variants') {
+                document.getElementById("variantsPrompt").value = selectedPrompt;
+            }
+
+            console.log("Applied persona prompt to", targetField);
+        });
+    });
+});
 
     // Show/hide custom prompt fields when ChatGPT is selected
     function toggleCustomPromptFields() {
@@ -401,6 +426,5 @@ document.addEventListener("DOMContentLoaded", function () {
         });
     });
 
-    // Run toggle function on load in case "ChatGPT" is pre-selected
-    toggleCustomPromptFields();
-});
+  toggleCustomPromptFields();
+ // Add this closing parenthesis and semicolon

@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Export Products</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      margin: 2rem auto;
+      max-width: 600px;
+      padding: 2rem; 
+      line-height: 1.6;
+      color: #333;
+    }
+
+    h2 {
+      margin-bottom: 1.5rem;
+      text-align: center;
+    }
+
+    label {
+      display: block;
+      font-weight: 600;
+      margin-top: 1rem;
+      margin-bottom: 0.25rem;
+    }
+
+    input, select, button {
+      width: 100%;
+      padding: 0.6rem;
+      margin-bottom: 1rem;
+      border: 1px solid #ccc;
+      border-radius: 0.4rem;
+      font-size: 1rem;
+    }
+
+    select:invalid {
+      color: #999;
+    }
+
+    button {
+      background-color: #0e76fd;
+      color: white;
+      font-weight: bold;
+      cursor: pointer;
+      transition: background-color 0.3s ease;
+    }
+
+    button:hover {
+      background-color: #005fe0;
+    }
+
+    #loading {
+      text-align: center;
+      font-weight: bold;
+      color: #888;
+    }
+
+    #exportResult {
+      white-space: pre-wrap;
+      margin-top: 1.5rem;
+      background: #f9f9f9;
+      padding: 1rem;
+      border-radius: 0.4rem;
+      border: 1px solid #e0e0e0;
+    }
+
+    .sheet-button {
+      background-color: #28a745;
+      color: white;
+    }
+
+    .continue-button {
+      background-color: #ff9800;
+      color: white;
+    }
+
+    @media (max-width: 640px) {
+      body {
+        padding: 1rem;
+        margin: 1rem auto;
+      }
+    }
+  </style>
+</head>
+<body>
+  <h2>🛫 Export Products to Target Stores</h2>
+
+  <!-- Sheet-only generator -->
+
+
+  <!-- Export form -->
+  <form id="exportForm" method="POST" novalidate aria-label="Export Form">
+    <label for="start_date">📅 Start Date</label>
+    <input type="date" name="start_date" id="start_date" required pattern="\d{4}-\d{2}-\d{2}" />
+
+    <label for="end_date">📅 End Date</label>
+    <input type="date" name="end_date" id="end_date" required pattern="\d{4}-\d{2}-\d{2}" />
+
+    <label for="min_sales">🔢 Minimum Sales</label>
+    <input type="number" name="min_sales" id="min_sales" min="1" value="1" required />
+
+    <label for="store">🏬 Target Store</label>
+    <select name="store" id="storeDropdown" required>
+      <option value="" disabled selected>Select a store...</option>
+    </select>
+
+    <label for="language">🈸 Target Language</label>
+    <select name="language" id="language" required>
+      <option value="" disabled selected>Select a language...</option>
+      <option value="de">German</option>
+      <option value="fr">French</option>
+      <option value="nl">Dutch</option>
+      <option value="da">Danish</option>
+      <option value="es">Spanish</option>
+    </select>
+
+    <div style="margin-bottom: 2rem;">
+      <button id="exportSubmitBtn" type="submit" class="sheet-button">
+        📊 Generate Sales Sheet
+      </button>
+      <div id="sheetStatus" style="margin-top: 0.5rem;"></div>
+    </div>
+    
+
+    <!-- Hidden by default -->
+    <div id="cloneButtonContainer" style="display: none;">
+      <button type="button" id="cloneBtn">🧬 Clone Products</button>
+    </div>
+
+    <!-- Hidden by default -->
+    <div id="translateButtonContainer" style="display: none;">
+      <button type="button" id="translateBtn">🌍 Translate Products</button>
+    </div>
+  
+  </form>
+
+  <label for="title_method">📝 Title Translation Method</label>
+<select name="title_method" id="title_method" required>
+  <option value="deepseek">DeepSeek</option>
+  <option value="chatgpt">ChatGPT</option>
+  <option value="google">Google Translate</option>
+  <option value="deepl">DeepL</option>
+</select>
+
+<div id="title_prompt_container" style="display:none;">
+  <label for="title_prompt">✍️ Custom ChatGPT Prompt for Title</label>
+  <textarea id="title_prompt" name="title_prompt" rows="2">
+Improve the product title by following this structure: 'Human name' | 'Product name'.
+  </textarea>
+</div>
+
+<label for="desc_method">📄 Description Translation Method</label>
+<select name="desc_method" id="desc_method" required>
+  <option value="google">Google Translate</option>
+  <option value="deepseek">DeepSeek</option>
+  <option value="chatgpt">ChatGPT</option>
+  <option value="deepl">DeepL</option>
+</select>
+
+<div id="desc_prompt_container" style="display:none;">
+  <label for="desc_prompt">✍️ Custom ChatGPT Prompt for Description</label>
+  <textarea id="desc_prompt" name="desc_prompt" rows="2"></textarea>
+</div>
+
+<label for="variant_method">🎯 Variant Option Translation Method</label>
+<select name="variant_method" id="variant_method" required>
+  <option value="google">Google Translate</option>
+  <option value="deepseek">DeepSeek</option>
+  <option value="chatgpt">ChatGPT</option>
+  <option value="deepl">DeepL</option>
+</select>
+
+<div id="variant_prompt_container" style="display:none;">
+  <label for="variant_prompt">✍️ Custom ChatGPT Prompt for Variant Options</label>
+  <textarea id="variant_prompt" name="variant_prompt" rows="2"></textarea>
+</div>
+
+
+  <!-- Sheet review area for full export -->
+  <div id="reviewSheetContainer" style="margin-top: 1rem; display: none;">
+    <a id="sheetReviewLink" href="#" target="_blank">
+      <button type="button" class="sheet-button">📄 Review Sheet</button>
+    </a>
+    <button id="continueExportBtn" type="button" class="continue-button" style="margin-left: 0.5rem;">
+      🚀 Continue Export
+    </button>
+  </div>
+
+  <div id="loading" style="display:none;">⏳ Exporting...</div>
+  <div id="exportResult"></div>
+
+  <script src="/static/export.js"></script>
+</body>
+</html>

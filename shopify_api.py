@@ -12,6 +12,7 @@ import json
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
+
 # -------------------------------------------------------------------------
 # Shopify API Credentials
 # -------------------------------------------------------------------------
@@ -21,7 +22,14 @@ SHOPIFY_API_KEY = os.getenv("SHOPIFY_API_KEY")
 # -------------------------------------------------------------------------
 # Base API URL (adjust API version if needed)
 # -------------------------------------------------------------------------
-SHOPIFY_API_BASE = f"https://{SHOPIFY_STORE_URL}/admin/api/2023-04"
+def ensure_https(url):
+    url = url.strip()
+    if not url.startswith("http://") and not url.startswith("https://"):
+        return f"https://{url}"
+    return url
+
+SHOPIFY_API_BASE = f"{ensure_https(SHOPIFY_STORE_URL)}/admin/api/2023-04"
+
 
 # -------------------------------------------------------------------------
 # Helper: extract_id

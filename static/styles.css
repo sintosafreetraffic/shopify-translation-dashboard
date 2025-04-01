@@ -1,0 +1,75 @@
+body {
+  font-family: system-ui, sans-serif;
+  margin: 2rem auto;
+  max-width: 600px;
+  padding: 2rem;
+  line-height: 1.6;
+  color: #333;
+  background-color: #f8f9fa;
+}
+
+h2 {
+  margin-bottom: 1.5rem;
+  text-align: center;
+  color: #222;
+}
+
+label {
+  display: block;
+  font-weight: 600;
+  margin-top: 1rem;
+  margin-bottom: 0.25rem;
+}
+
+input,
+select,
+button {
+  width: 100%;
+  padding: 0.6rem;
+  margin-bottom: 1rem;
+  border: 1px solid #ccc;
+  border-radius: 0.4rem;
+  font-size: 1rem;
+}
+
+select:invalid {
+  color: #999;
+}
+
+button {
+  background-color: #0e76fd;
+  color: white;
+  font-weight: bold;
+  cursor: pointer;
+  transition: background-color 0.3s ease;
+}
+
+button:hover {
+  background-color: #005fe0;
+}
+
+#loading {
+  text-align: center;
+  font-weight: bold;
+  color: #888;
+}
+
+#exportResult {
+  white-space: pre-wrap;
+  margin-top: 1.5rem;
+  background: #ffffff;
+  padding: 1rem;
+  border-radius: 0.4rem;
+  border: 1px solid #e0e0e0;
+}
+
+#reviewSheetContainer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+}
+
+#reviewSheetContainer button {
+  flex: 1;
+}

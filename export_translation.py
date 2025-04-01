@@ -1,9 +1,15 @@
+import logging
+from utils import slugify
+from post_processing import post_process_description
+
+logger = logging.getLogger(__name__)
+
+
 import os
 import sys
 from dotenv import load_dotenv
 load_dotenv()
 import uuid
-
 
 import requests
 import logging
@@ -11,13 +17,7 @@ import openai
 import re
 from openai import OpenAI
 
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
-
-if not DEEPSEEK_API_KEY:
-    raise ValueError("Missing DeepSeek API Key. Set it as an environment variable.")
-
 client = OpenAI(api_key=os.getenv("CHATGPT_API_KEY"))
-client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com")
 
 # 1) langdetect for auto-detection from descriptions
 from langdetect import detect, LangDetectException
@@ -392,96 +392,6 @@ def chatgpt_translate(
         logging.error(f"[chatgpt_translate] Error: {e}")
         return text  # Fallback
 
-def deepseek_translate_title(product_title: str, custom_prompt: str = "", target_language: str = "German") -> str:
-    """Translate product title using DeepSeek API with formatting constraints."""
-    if not product_title.strip():
-        return product_title
-
-    system_instructions = (
-        f"You are an expert e-commerce copywriter and translator. "
-        f"Translate and rewrite product titles to be persuasive, SEO-friendly, and fully adapted to {target_language}. "
-        f"Follow the format '[Brand] | [Product Name]'.\n\n"
-        "- DO NOT add extra formatting characters.\n"
-        "- Keep '[Product Name]' under 4 words.\n"
-        "- Ensure the title is ≤ 20 tokens, ≤ 200 characters.\n"
-    )
-
-    user_content = f"""
-    Original Title: {product_title}
-
-    User Modifications: {custom_prompt}
-
-    Translate and rewrite entirely into {target_language}, keeping structure and SEO focus.
-    """
-
-    messages = [
-        {"role": "system", "content": system_instructions},
-        {"role": "user", "content": user_content}
-    ]
-
-    try:
-        response = client.chat.completions.create(
-            model="deepseek-chat",  # Updated model
-            messages=messages,
-            max_tokens=60
-        )
-
-        translated_title = response.choices[0].message.content.strip()
-        logging.info("✅ DeepSeek Output:\n%s", translated_title)
-
-        return translated_title
-
-    except Exception as e:
-        logging.error(f"deepseek_translate_title error: {e}")
-        return product_title  # Fallback
-
-
-def deepseek_translate(text: str, custom_prompt: str = "", target_language: str = "German") -> str:
-    """Translate product descriptions using DeepSeek."""
-    if not text.strip():
-        return text
-
-    system_instructions = (
-        "You are an expert e-commerce copywriter. Rewrite the product description "
-        f"into {target_language} in a structured format:\n\n"
-        "Product Title: [Enticing SEO title]\n"
-        "Short Introduction: [3–5 sentences]\n"
-        "Product Advantages:\n"
-        "- [Feature]: [Benefit-driven explanation]\n"
-        "Call to Action: [Persuasive closing sentence]\n\n"
-        "Always follow this structure."
-    )
-
-    user_content = f"""
-    Original Description: {text}
-
-    {custom_prompt}
-
-    Translate into {target_language} following the structured format.
-    """
-
-    messages = [
-        {"role": "system", "content": system_instructions},
-        {"role": "user", "content": user_content}
-    ]
-
-    try:
-        response = client.chat.completions.create(
-            model="deepseek-chat",
-            messages=messages,
-            temperature=0.7,
-            max_tokens=1500
-        )
-
-        translated_text = response.choices[0].message.content.strip()
-        logging.info("✅ DeepSeek Translation Output:\n%s", translated_text)
-
-        return translated_text
-
-    except Exception as e:
-        logging.error(f"deepseek_translate error: {e}")
-        return text  # Fallback
-    
 # ---------------------------------- #
 # apply_translation_method
 # ---------------------------------- #
@@ -685,7 +595,7 @@ def parse_ai_description(ai_text, language='en'):
 # ---------------------------------- #
 # apply_method
 # ---------------------------------- #
-def apply_method(
+def apply_method( 
     text: str,
     method: str,
     custom_prompt: str = "",

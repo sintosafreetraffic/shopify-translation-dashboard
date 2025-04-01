@@ -1,318 +1,262 @@
 import os
-import re
-import logging
-import sqlite3
-import pandas as pd
 import gspread
-
+import logging
 from oauth2client.service_account import ServiceAccountCredentials
+import time
 
-# For converting HTML to structured text
-from bs4 import BeautifulSoup
+# Setup logger
+logger = logging.getLogger("google_sheets")
+logger.setLevel(logging.INFO)
 
-# Local modules (adjust import paths if needed)
-from shopify_api import fetch_product_by_id  # Must handle variant->product resolution
-from translation import google_translate, chatgpt_translate
+GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
+GOOGLE_SHEET_ID = "11PVJZkYeZfEtcuXZ7U4xiV1r_axgAIaSe88VgFF189E"
 
-###############################################################################
-# CONFIG & CONSTANTS
-###############################################################################
-DATABASE = "translations.db"
+import time  # optional for retry delay
 
-# Only allow columns A, B, or C
-VALID_COLUMNS = {"A": 0, "B": 1, "C": 2}
 
-# Google Sheets Logging
-CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
-SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "Translation Log")
+def get_pending_products_from_sheet():
+    import gspread
+    from oauth2client.service_account import ServiceAccountCredentials
 
-# Configure Logging
-logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
-
-###############################################################################
-# 1) PRE-PROCESS DESCRIPTION
-###############################################################################
-def pre_process_description(original_html: str) -> str:
-    """
-    Remove inline styles, empty <p>, repeated <br>, data-* attributes, etc.
-    So ChatGPT or final display is simpler.
-    """
-    logging.debug("[pre_process_description] Original HTML snippet:\n%s", original_html[:300])
-
-    # 1) Remove inline style="..."
-    cleaned = re.sub(r'style\s*=\s*"[^"]*"', '', original_html, flags=re.IGNORECASE)
-    logging.debug("[pre_process_description] After removing inline styles:\n%s", cleaned[:300])
-
-    # 2) Remove empty <p> (like <p>&nbsp;</p>)
-    cleaned = re.sub(r'<p[^>]*>(\s|&nbsp;)*</p>', '', cleaned, flags=re.IGNORECASE)
-    logging.debug("[pre_process_description] After removing empty <p>:\n%s", cleaned[:300])
-
-    # 3) Reduce repeated <br>
-    cleaned = re.sub(r'(<br\s*/?>\s*){2,}', '<br>', cleaned)
-    logging.debug("[pre_process_description] After reducing repeated <br>:\n%s", cleaned[:300])
-
-    # 4) Remove data-* attributes (data-start, data-end, data-mce-*, etc.)
-    cleaned = re.sub(r'\sdata-[^=]+="[^"]*"', '', cleaned)
-    logging.debug("[pre_process_description] After removing data-*:\n%s", cleaned[:300])
-
-    final_html = cleaned.strip()
-    logging.debug("[pre_process_description] Final cleaned HTML:\n%s", final_html[:300])
-    return final_html
-
-###############################################################################
-# 2) CONVERT HTML → STRUCTURED PLAIN TEXT
-###############################################################################
-def html_to_structured_text(html: str) -> str:
-    """
-    Parse HTML into a plain text representation:
-      - Headings => '### Title'
-      - Bullets => '- item'
-      - paragraphs => plain lines
-    Adjust the style as you like.
-    """
-    soup = BeautifulSoup(html, "html.parser")
-    lines = []
-
-    def walk(element):
-        # Headings => # or ##
-        if element.name in ["h1", "h2", "h3", "h4", "h5", "h6"]:
-            lvl = int(element.name[-1])  # e.g. '3' from 'h3'
-            heading_text = element.get_text(strip=True)
-            prefix = "#" * lvl
-            lines.append(f"{prefix} {heading_text}")
-            return
-
-        elif element.name == "p":
-            p_text = element.get_text(strip=True)
-            if p_text:
-                lines.append(p_text)
-            return
-
-        elif element.name == "ul":
-            # Bullets => '- item'
-            for li in element.find_all("li", recursive=False):
-                li_text = li.get_text(strip=True)
-                if li_text:
-                    lines.append(f"- {li_text}")
-            return
-
-        elif element.name == "ol":
-            # Numbered => '1. item'
-            num = 1
-            for li in element.find_all("li", recursive=False):
-                li_text = li.get_text(strip=True)
-                if li_text:
-                    lines.append(f"{num}. {li_text}")
-                    num += 1
-            return
-
-        else:
-            # For div, span, etc., we walk children
-            for child in element.children:
-                if child.name is not None:
-                    walk(child)
-
-    walk(soup)
-    return "\n".join(lines)
-
-###############################################################################
-# 3) FETCH PRODUCT HELPER (resolves variant->product if needed)
-###############################################################################
-def unified_fetch_product(id_or_url):
-    logging.debug("[unified_fetch_product] Attempt fetch: %s", id_or_url)
-    product = fetch_product_by_id(id_or_url)
-    if product:
-        logging.debug("[unified_fetch_product] Fetched product ID %s, title: %s",
-                      product.get("id"), product.get("title"))
-    else:
-        logging.debug("[unified_fetch_product] No product for: %s", id_or_url)
-    return product
-
-###############################################################################
-# 4) FETCH TEST PRODUCT FROM SHEET
-###############################################################################
-def fetch_test_product(file,
-                       image_column="A",
-                       starting_row=2,
-                       pre_process=False,
-                       convert_to_text=False):
-    """
-    1) Reads an Excel/CSV.
-    2) Grab the product ID from the chosen col & row.
-    3) Calls unified_fetch_product.
-    4) If pre_process => pre_process_description.
-    5) If convert_to_text => html_to_structured_text.
-    Returns a dict: { success, row_index, product_id, title, description, image_url }
-    """
-    if image_column not in VALID_COLUMNS:
-        err = f"Invalid column '{image_column}'. Use A, B, or C."
-        logging.error("[fetch_test_product] %s", err)
-        return {"error": err}
-
-    logging.debug("[fetch_test_product] Opening file: %s", file)
-    df = pd.read_excel(file)
-    col_idx = VALID_COLUMNS[image_column]
-
-    # Skip rows
-    df = df.iloc[starting_row - 1:]
-    logging.debug("[fetch_test_product] after skipping rows => shape=%s", df.shape)
-
-    for i, row in df.iterrows():
-        product_ref = str(row.iloc[col_idx]).strip()
-        logging.debug("[fetch_test_product] Row %d => '%s'", i + starting_row, product_ref)
-
-        if product_ref:
-            product = unified_fetch_product(product_ref)
-            if product:
-                # Start with the raw or pre-processed HTML
-                raw_html = product.get("body_html", "")
-                if pre_process:
-                    logging.debug("[fetch_test_product] Pre-processing row %d", i + starting_row)
-                    raw_html = pre_process_description(raw_html)
-
-                # Possibly convert HTML => plain text
-                final_desc = raw_html
-                if convert_to_text:
-                    text_version = html_to_structured_text(final_desc)
-                    final_desc = text_version
-
-                return {
-                    "success": True,
-                    "row_index": i + starting_row,
-                    "product_id": product["id"],
-                    "title": product.get("title", ""),
-                    "description": final_desc,
-                    "image_url": product.get("image", {}).get("src", "")
-                }
-
-    msg = "No valid products found in the selected column."
-    logging.warning("[fetch_test_product] %s", msg)
-    return {"error": msg}
-
-###############################################################################
-# 5) PROCESS GOOGLE SHEET (Single Test Product)
-###############################################################################
-def process_google_sheet(file,
-                         image_column="A",
-                         starting_row=2,
-                         pre_process=False,
-                         convert_to_text=False):
-    """
-    1) Calls fetch_test_product with the chosen flags.
-    2) If success, returns { test_product: {...}, bulk_ready: True, message }
-    """
-    logging.debug("[process_google_sheet] file=%s, col=%s, row=%d, pre_process=%s, convert_to_text=%s",
-                  file, image_column, starting_row, pre_process, convert_to_text)
-
-    test_prod = fetch_test_product(file,
-                                   image_column=image_column,
-                                   starting_row=starting_row,
-                                   pre_process=pre_process,
-                                   convert_to_text=convert_to_text)
-    if "error" in test_prod:
-        logging.debug("[process_google_sheet] Error => %s", test_prod["error"])
-        return test_prod
-
-    result = {
-        "test_product": test_prod,
-        "bulk_ready": True,
-        "message": "Test product fetched. You can now run bulk translation."
-    }
-    logging.debug("[process_google_sheet] returning => %s", result)
-    return result
-
-###############################################################################
-# 6) BULK TRANSLATION: PRE-PROCESS & STORE "PENDING"
-###############################################################################
-def process_bulk_translation(file, image_column="A", starting_row=2, target_lang="de"):
-    """
-    1) Read file 
-    2) For each row => fetch product => pre_process => 
-       google/chatgpt => store in DB as 'Pending'
-    """
-    if image_column not in VALID_COLUMNS:
-        err = f"Invalid column '{image_column}'. Use A, B, or C."
-        logging.error("[process_bulk_translation] %s", err)
-        return {"error": err}
-
-    logging.debug("[process_bulk_translation] file=%s col=%s row=%d lang=%s",
-                  file, image_column, starting_row, target_lang)
-
-    df = pd.read_excel(file)
-    col_idx = VALID_COLUMNS[image_column]
-    count = 0
-
-    with sqlite3.connect(DATABASE) as conn:
-        cursor = conn.cursor()
-
-        for i, row in df.iterrows():
-            actual_row = i + 1
-            if actual_row < starting_row:
-                continue
-
-            product_ref = str(row.iloc[col_idx]).strip()
-            if not product_ref:
-                logging.debug("[process_bulk_translation] row %d => empty => skip", actual_row)
-                continue
-
-            logging.debug("[process_bulk_translation] row %d => '%s'", actual_row, product_ref)
-            product = unified_fetch_product(product_ref)
-            if not product:
-                logging.debug("[process_bulk_translation] no product => skip row %d", actual_row)
-                continue
-
-            product_id = product["id"]
-            original_title = product.get("title", "")
-            original_desc = product.get("body_html", "")
-
-            # Pre-process
-            logging.debug("[process_bulk_translation] row %d => Pre-processing desc", actual_row)
-            cleaned_desc = pre_process_description(original_desc)
-
-            # e.g. Translate title => google, desc => chatgpt
-            logging.debug("[process_bulk_translation] row %d => google+chatgpt translation", actual_row)
-            translated_title = google_translate(original_title, target_language=target_lang)
-            translated_description = chatgpt_translate(cleaned_desc, target_language=target_lang)
-
-            # Insert as "Pending"
-            logging.debug("[process_bulk_translation] row %d => Insert to DB as Pending", actual_row)
-            cursor.execute("""
-                INSERT OR IGNORE INTO translations
-                (product_id, product_title, translated_title, product_description, translated_description, image_url, batch, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                product_id,
-                original_title,
-                translated_title,
-                original_desc,  # store raw desc
-                translated_description,
-                product.get("image", {}).get("src", ""),
-                "Google Sheet Bulk",
-                "Pending"
-            ))
-            count += 1
-
-        conn.commit()
-
-    logging.info("[process_bulk_translation] Processed %d products successfully.", count)
-    return {"success": True, "message": f"{count} products processed successfully."}
-
-###############################################################################
-# 7) LOG TRANSLATION (OPTIONAL)
-###############################################################################
-def log_translation(product_id, translated_title, translated_description, status):
-    """
-    Log a translation event in a separate Google Sheet, if desired.
-    """
-    logging.debug("[log_translation] product=%s status=%s", product_id, status)
     try:
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
+        creds = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_CREDENTIALS_FILE, scope)
         client = gspread.authorize(creds)
-        sheet = client.open(SHEET_NAME).sheet1
 
-        sheet.append_row([product_id, translated_title, translated_description, status])
-        logging.info("[log_translation] Logged product %s => %s in Google Sheet %s",
-                     product_id, status, SHEET_NAME)
+        sheet = client.open_by_key(GOOGLE_SHEET_ID).worksheet("Sheet1")
+        rows = sheet.get_all_records()
+
+        pending_products = []
+        for row in rows:
+            if str(row.get("Status", "")).strip().upper() == "PENDING":
+                pending_products.append({
+                    "product_id": row.get("Product ID"),
+                    "title": row.get("Product Title"),
+                    "sales_count": row.get("Sales Count", 1),
+                    "cloned_gid": row.get("Cloned Product GID")
+                })
+
+        logger.info(f"📋 Loaded {len(pending_products)} PENDING products from Sheet1")
+        return pending_products
+
     except Exception as e:
-        logging.error("[log_translation] error => %s", e)
+        logger.warning("⚠️ Could not load Google Sheets to check duplicates. Proceeding without that filter.")
+        return []
+
+MAX_RETRIES = 5
+RETRY_DELAY = 2  # seconds base for backoff
+
+def update_product_status_in_sheet(product_id, new_status, sheet=None):
+    retries = 0
+
+    while retries < MAX_RETRIES:
+        try:
+            if sheet is None:
+                scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+                creds = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_CREDENTIALS_FILE, scope)
+                client = gspread.authorize(creds)
+                sheet = client.open_by_key(GOOGLE_SHEET_ID).worksheet("Sheet1")
+
+            all_values = sheet.get_all_values()
+            if not all_values:
+                return False
+
+            rows = all_values[1:]
+
+            for idx, row_data in enumerate(rows, start=2):
+                if len(row_data) < 1:
+                    continue
+                sheet_pid = row_data[0]
+                if str(sheet_pid) == str(product_id):
+                    sheet.update_cell(idx, 4, new_status)
+                    logger.info(f"✅ Set product_id={product_id} status -> {new_status}")
+                    return True
+
+            logger.warning(f"⚠️ Could not find product_id={product_id} in Sheet1.")
+            return False
+
+        except Exception as e:
+            if "429" in str(e):
+                retries += 1
+                wait = RETRY_DELAY * retries
+                logger.warning(f"🔁 Rate limit hit. Retrying in {wait}s (Attempt {retries}/{MAX_RETRIES})")
+                time.sleep(wait)
+            else:
+                logger.exception("❌ Error in update_product_status_in_sheet")
+                return False
+
+    logger.error("🚫 Max retries exceeded for update_product_status_in_sheet")
+    return False
+
+def get_products_pending_translation_from_sheet1(sheet):
+    print("🧪 Called version with sheet param")  # Add this to verify!
+    """
+    Gets products that have the status 'PENDING' from the provided Sheet1.
+    Returns a list of dicts with 'original_pid' and 'cloned_gid'.
+    """
+    try:
+        rows = sheet.get_all_records()
+
+        pending_translation_products = []
+        for row in rows:
+            if str(row.get("Status", "")).strip().upper() == "PENDING":
+                pending_translation_products.append({
+                    "original_pid": row.get("Product ID"),
+                    "cloned_gid": row.get("Cloned Product GID")
+                })
+
+        logger.info(f"📋 Loaded {len(pending_translation_products)} products pending translation.")
+        return pending_translation_products
+
+    except Exception as e:
+        logger.exception("❌ Failed to load products pending translation.")
+        return []
+
+def mark_product_translation_done_in_sheet(product_gid):
+    """
+    Marks a product's translation status as 'TRANSLATION_DONE' in Sheet1.
+    Uses the 'Cloned Product GID' to find the correct row.
+    """
+    try:
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_CREDENTIALS_FILE, scope)
+        client = gspread.authorize(creds)
+
+        sheet1 = client.open_by_key(GOOGLE_SHEET_ID).worksheet("Sheet1")
+
+        all_values = sheet1.get_all_values()
+        header = all_values[0]
+        rows = all_values[1:]
+
+        # Assume headers: ["Product ID", "Product Title", "Sales Count", "Status", "Cloned Product GID"]
+        gid_col_index = header.index("Cloned Product GID") if "Cloned Product GID" in header else -1
+        status_col_index = header.index("Status") if "Status" in header else -1
+
+        if gid_col_index == -1 or status_col_index == -1:
+            logger.error("⚠️ Required columns not found in Sheet1.")
+            return False
+
+        for idx, row in enumerate(rows, start=2):
+            if len(row) > gid_col_index and str(row[gid_col_index]) == str(product_gid):
+                sheet1.update_cell(idx, status_col_index + 1, "TRANSLATION_DONE")
+                logger.info(f"✅ Updated translation status to TRANSLATION_DONE for GID {product_gid}")
+                return True
+
+        logger.warning(f"⚠️ Could not find product GID {product_gid} in Sheet1.")
+        return False
+
+    except Exception as e:
+        logger.exception(f"❌ Error marking translation done for product GID {product_gid}.")
+        return False
+
+def export_sales_to_sheet(product_sales):
+    try:
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_CREDENTIALS_FILE, scope)
+        client = gspread.authorize(creds)
+
+        sheet = client.open_by_key(GOOGLE_SHEET_ID)
+        sheet1 = sheet.worksheet("Sheet1")
+        sheet2 = sheet.worksheet("Sheet2")
+
+        # Ensure headers
+        headers = ["Product ID", "Product Title", "Sales Count", "Status", "Cloned Product GID"]
+        if sheet1.row_values(1) != headers:
+            sheet1.delete_rows(1)
+            sheet1.insert_row(headers, 1)
+        if sheet2.row_values(1) != headers:
+            sheet2.delete_rows(1)
+            sheet2.insert_row(headers, 1)
+
+        existing_sheet1 = sheet1.get_all_records()
+        existing_sheet2 = sheet2.get_all_records()
+
+        sheet1_id_to_row = {str(row["Product ID"]): idx + 2 for idx, row in enumerate(existing_sheet1)}
+        sheet2_ids = {str(row["Product ID"]) for row in existing_sheet2}
+
+        new_rows = []
+        batch_updates = []
+
+        for item in product_sales:
+            pid = str(item.get("product_id"))
+            title = item.get("title")
+            count = item.get("sales_count")
+
+            if pid in sheet2_ids:
+                continue
+
+            if pid in sheet1_id_to_row:
+                row_idx = sheet1_id_to_row[pid]
+                current_row = existing_sheet1[row_idx - 2]
+                if current_row.get("Status", "").strip().upper() in ["DONE", "APPROVED"]:
+                    sheet2.append_row([
+                        current_row.get("Product ID"),
+                        current_row.get("Product Title"),
+                        current_row.get("Sales Count"),
+                        "DONE",
+                        current_row.get("Cloned Product GID", "")
+                    ])
+                    sheet1.delete_rows(row_idx)
+                    continue
+                else:
+                    batch_updates.append((row_idx, 3, count))
+                continue
+
+            # New rows should explicitly have empty cloned_gid initially
+            new_rows.append([pid, title, count, "PENDING", ""])
+
+        if new_rows:
+            sheet1.append_rows(new_rows, value_input_option="USER_ENTERED")
+            logger.info(f"➕ Added {len(new_rows)} new rows to Sheet1")
+
+        if batch_updates:
+            data = [{"range": f"C{row}", "values": [[value]]} for row, _, value in batch_updates]
+            sheet1.batch_update([{"range": d["range"], "values": d["values"]} for d in data])
+            logger.info(f"🧠 Batch updated {len(batch_updates)} sales counts")
+
+        return f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/edit"
+
+    except Exception as e:
+        logger.exception("❌ Failed to export to Google Sheets")
+        return ""
+
+    
+def move_done_to_sheet2():
+    """
+    Moves all rows from Sheet1 that have status 'DONE' to Sheet2 and removes them from Sheet1.
+    """
+    try:
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_CREDENTIALS_FILE, scope)
+        client = gspread.authorize(creds)
+
+        sheet = client.open_by_key(GOOGLE_SHEET_ID)
+        sheet1 = sheet.worksheet("Sheet1")
+        sheet2 = sheet.worksheet("Sheet2")
+
+        all_rows = sheet1.get_all_values()
+        header, rows = all_rows[0], all_rows[1:]
+
+        keep_rows = [header]
+        done_rows = []
+
+        for row in rows:
+            if len(row) >= 4 and row[3].strip().upper() == "DONE":
+                done_rows.append(row)
+            else:
+                keep_rows.append(row)
+
+        if done_rows:
+            sheet2.append_rows(done_rows, value_input_option="USER_ENTERED")
+            sheet1.clear()
+            sheet1.append_rows(keep_rows, value_input_option="USER_ENTERED")
+            logger.info(f"✅ Moved {len(done_rows)} DONE products to Sheet2.")
+        else:
+            logger.info("📭 No DONE rows to move.")
+
+    except Exception as e:
+        logger.exception("❌ Failed to move DONE rows to Sheet2.")
+
+    except Exception as e:
+        logger.exception("❌ Error in update_product_status_in_sheet")
+        return False

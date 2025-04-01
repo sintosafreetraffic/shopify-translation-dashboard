@@ -6,6 +6,7 @@
   <title>Shopify Translation Dashboard</title>
   <link rel="icon" href="data:,">
 
+
   <!-- Bootstrap CSS -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.0/css/bootstrap.min.css" />
 
@@ -54,7 +55,10 @@
 <div class="container mt-4">
   <h1>Shopify Translation Dashboard</h1>
   <p>Translate your Shopify products using Google, DeepL, or ChatGPT. Optionally preserve HTML formatting and insert images with ChatGPT.</p>
-
+  <a href="/export" id="goToExportBtn">
+    <button>🛫 Go to Export Page</button>
+  </a>
+  
   <!-- A) LANGUAGE SELECTION -->
   <div class="card p-3 mb-3">
     <h4>Language Selection</h4>
@@ -130,52 +134,56 @@
 
   <form id="fieldSelectionForm">
     <!-- Product Title -->
-      <div class="mb-3">
-          <label class="form-label"><strong>Product Title</strong></label>
-          <input type="checkbox" class="form-check-input" name="fields" value="title" id="titleField">
-          <select class="form-select field-method" id="titleMethod">
-              <option value="google">Google Translate</option>
-              <option value="deepl">DeepL</option>
-              <option value="chatgpt">ChatGPT</option>
-          </select>
-          <div class="chatgpt-prompt" id="titlePromptContainer">
-              <label class="form-label">Custom Prompt for Title:</label>
-              <textarea id="titlePrompt" class="form-control" rows="2"></textarea>
-          </div>
+    <div class="mb-3">
+      <label class="form-label"><strong>Product Title</strong></label>
+      <input type="checkbox" class="form-check-input" name="fields" value="title" id="titleField">
+      <select class="form-select field-method" id="titleMethod">
+        <option value="deepseek">DeepSeek</option>
+        <option value="google">Google Translate</option>
+        <option value="deepl">DeepL</option>
+        <option value="chatgpt">ChatGPT</option>
+      </select>
+      <div class="method-prompt" id="titlePromptContainer">
+        <label class="form-label">Custom Prompt for Title:</label>
+        <textarea id="titlePrompt" class="form-control" rows="2" placeholder="E.g.: 'Translate this title while maintaining SEO best practices'"></textarea>
+        <small class="text-muted">Applies to both ChatGPT and DeepSeek translations</small>
       </div>
+    </div>
 
       <!-- Product Description -->
       <div class="mb-3">
-          <label class="form-label"><strong>Product Description</strong></label>
-          <input type="checkbox" class="form-check-input" name="fields" value="body_html" id="descField">
-          <select class="form-select field-method" id="descMethod">
-              <option value="google">Google Translate</option>
-              <option value="deepl">DeepL</option>
-              <option value="chatgpt">ChatGPT</option>
-          </select>
-          <div class="chatgpt-prompt" id="descPromptContainer">
-              <label class="form-label">Custom Prompt for Description:</label>
-              <textarea id="descPrompt" class="form-control" rows="3"></textarea>
-          </div>
+        <label class="form-label"><strong>Product Description</strong></label>
+        <input type="checkbox" class="form-check-input" name="fields" value="body_html" id="descField">
+        <select class="form-select field-method" id="descMethod">
+          <option value="google">Google Translate</option>
+          <option value="deepseek">DeepSeek</option>
+          <option value="deepl">DeepL</option>
+          <option value="chatgpt">ChatGPT</option>
+        </select>
+        <div class="method-prompt" id="descPromptContainer">
+          <label class="form-label">Custom Prompt for Description:</label>
+          <textarea id="descPrompt" class="form-control" rows="3" placeholder="E.g.: 'Translate this description while maintaining HTML formatting'"></textarea>
+          <small class="text-muted">Applies to both ChatGPT and DeepSeek translations</small>
+        </div>
       </div>
 
       <div class="mb-3">
-          <label class="form-label"><strong>Product Variants & Values</strong></label>
-          <input type="checkbox" class="form-check-input" name="fields" value="variants" id="variantsField">
-          <select class="form-select field-method" id="variantsMethod">
-              <option value="google">Google Translate</option>
-              <option value="deepl">DeepL</option>
-              <option value="chatgpt">ChatGPT</option>
-          </select>
-          <div class="variantsPromptContainer" id="variantPromptContainer">
-            <label>Custom Prompt for Variants:</label>
-            <textarea id="variantsPrompt" class="form-control"></textarea>
-          </div>          
+        <label class="form-label"><strong>Product Variants & Values</strong></label>
+        <input type="checkbox" class="form-check-input" name="fields" value="variants" id="variantsField">
+        <select class="form-select field-method" id="variantsMethod">
+          <option value="google">Google Translate</option>
+          <option value="deepseek">DeepSeek</option>
+          <option value="deepl">DeepL</option>
+          <option value="chatgpt">ChatGPT</option>
+        </select>
+        <div class="method-prompt" id="variantsPromptContainer">
+          <label class="form-label">Custom Prompt for Variants:</label>
+          <textarea id="variantsPrompt" class="form-control" rows="3" placeholder="E.g.: 'Translate variant names keeping size formats consistent'"></textarea>
+          <small class="text-muted">Applies to both ChatGPT and DeepSeek translations</small>
+        </div>
       </div>
-  </form>
-
-</div>
-</form>
+    </form>
+  </div>
 
 <div id="bulkProgressContainer" style="display:none; margin-top: 1em;">
   <div style="border: 1px solid #ccc; width: 100%;">
