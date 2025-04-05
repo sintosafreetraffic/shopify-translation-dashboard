@@ -12,6 +12,7 @@ document.addEventListener("DOMContentLoaded", () => {
     initializeMethodHandlers();
 });
 
+
 function initializeMethodHandlers() {
     document.querySelectorAll('.field-method').forEach(select => {
         select.addEventListener('change', function () {
@@ -94,6 +95,35 @@ window.fetchProductsByCollection = function () {
       })
       .catch(error => console.error("Error fetching products:", error));
 };
+
+// Event listener for translation button
+document.getElementById('translateButton').addEventListener('click', function() {
+    // Get selected variant method and URL handle checkbox state
+    const generateUrlHandleChecked = document.getElementById('generate_url_handle').checked;
+
+    // Sample title for testing (you can replace this with dynamic data)
+    const productTitle = "Daisy | Luxuriöses 3-teiliges Dessous-Set";  // This should come from your product data
+    
+    // If checkbox is checked, generate URL handle from the product title (translated or original)
+    if (generateUrlHandleChecked) {
+        const urlHandle = generateUrlHandle(productTitle);
+        document.getElementById('generatedUrlHandle').textContent = `Generated URL Handle: ${urlHandle}`;
+    } else {
+        document.getElementById('generatedUrlHandle').textContent = '';
+    }
+});
+
+// Function to generate URL handle from the title
+function generateUrlHandle(productTitle) {
+    const normalizedTitle = productTitle
+        .toLowerCase()
+        .trim()
+        .replace(/\s+/g, '-') // Replace spaces with hyphens
+        .replace(/[^\w\-]+/g, ''); // Remove non-alphanumeric characters except for hyphens
+
+    return normalizedTitle;
+}
+
 
 // Display all fetched products dynamically
 function displayProducts(products) {

@@ -1,28 +1,18 @@
+# translation.py
+
 import os
 import sys
 from dotenv import load_dotenv
 load_dotenv()
 import uuid
-
-
+from langdetect import detect, LangDetectException # Moved import here
 import requests
 import logging
-import openai
+import openai # Keep this import
 import re
-from openai import OpenAI
+from openai import OpenAI # Keep this import
 
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
-
-if not DEEPSEEK_API_KEY:
-    raise ValueError("Missing DeepSeek API Key. Set it as an environment variable.")
-
-client = OpenAI(api_key=os.getenv("CHATGPT_API_KEY"))
-client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com")
-
-# 1) langdetect for auto-detection from descriptions
-from langdetect import detect, LangDetectException
-
-# 2) Google Translate from deep_translator
+# 1) Google Translate from deep_translator
 from deep_translator import GoogleTranslator
 
 logger = logging.getLogger(__name__)
@@ -31,18 +21,61 @@ logger = logging.getLogger(__name__)
 # ENVIRONMENT VARIABLES / API KEYS
 # ---------------------------------- #
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # For ChatGPT
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY") # For DeepSeek
 DEEPL_API_KEY = os.getenv("DEEPL_API_KEY")    # For DeepL
 
-# Set OpenAI key for global usage
-openai.api_key = OPENAI_API_KEY
+# --- Initialize SEPARATE Clients ---
+openai_client = None
+deepseek_client = None
 
-# Optional: confirm environment variables loaded
-logger.info(f"OPENAI_API_KEY present? {'Yes' if OPENAI_API_KEY else 'No'}")
+# Initialize OpenAI Client (for ChatGPT)
+if OPENAI_API_KEY:
+    try:
+        openai_client = OpenAI(api_key=OPENAI_API_KEY)
+        openai.api_key = OPENAI_API_KEY # Set global key if still needed elsewhere
+        logger.info("✅ OpenAI Client Initialized.")
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize OpenAI Client: {e}")
+else:
+    logger.warning("⚠️ OPENAI_API_KEY not found. ChatGPT features will be disabled.")
+
+# Initialize DeepSeek Client
+if DEEPSEEK_API_KEY:
+    try:
+        # Common base URL for DeepSeek's OpenAI-compatible endpoint is often /v1
+        # Verify this with DeepSeek documentation if needed.
+        deepseek_client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com/v1") 
+        logger.info("✅ DeepSeek Client Initialized.")
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize DeepSeek Client: {e}")
+else:
+    logger.warning("⚠️ DEEPSEEK_API_KEY not found. DeepSeek features will be disabled.")
+
+# Log DeepL key presence
 logger.info(f"DEEPL_API_KEY present? {'Yes' if DEEPL_API_KEY else 'No'}")
+
+# REMOVE the old/conflicting lines below if they still exist:
+# client = OpenAI(api_key=os.getenv("CHATGPT_API_KEY")) # REMOVE
+# client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com") # REMOVE
+# client = openai.OpenAI(api_key=OPENAI_API_KEY) # REMOVE
 
 # ---------------------------------- #
 # DETECT LANGUAGE FROM DESCRIPTION
 # ---------------------------------- #
+# ... (rest of your translation.py code) ...
+# ---------------------------------- #
+# DETECT LANGUAGE FROM DESCRIPTION
+# ---------------------------------- #
+
+def detect_language(text):
+    """Detect the language of a given text using langdetect."""
+    try:
+        detected_lang = detect(text)
+        print(f"🔍 Detected language: {detected_lang}")
+        return detected_lang
+    except Exception as e:
+        print(f"⚠️ Language detection failed: {e}")
+        return "en"  # Default to English if detection fails
 
 def clean_title(title: str) -> str:
     """
@@ -274,10 +307,10 @@ def chatgpt_translate_title(product_title: str, custom_prompt: str = "", target_
     ]
 
     try:
-        response = client.chat.completions.create(
+        response = openai_client.chat.completions.create( # Use openai_client
             model="gpt-4",
             messages=messages,
-            max_tokens=60
+            max_tokens=120
         )
 
         if not response.choices or not response.choices[0].message.content:
@@ -313,9 +346,7 @@ def chatgpt_translate_title(product_title: str, custom_prompt: str = "", target_
     except Exception as e:
         logger.error(f"chatgpt_translate_title error: {e}")
         return product_title  # fallback
-
-    
-    
+  
 def chatgpt_translate(
     text: str, 
     custom_prompt: str = "", 
@@ -343,8 +374,6 @@ def chatgpt_translate(
     if not OPENAI_API_KEY:
         logging.error("[chatgpt_translate] No OPENAI_API_KEY found. Returning original text.")
         return text
-
-    client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
     # **Force ChatGPT to always follow the structure**
     system_instructions = (
@@ -375,7 +404,7 @@ def chatgpt_translate(
     ]
 
     try:
-        response = client.chat.completions.create(
+        response = openai_client.chat.completions.create( # Use openai_client
             model="gpt-4",
             messages=messages,
             temperature=0.7,
@@ -391,28 +420,55 @@ def chatgpt_translate(
     except Exception as e:
         logging.error(f"[chatgpt_translate] Error: {e}")
         return text  # Fallback
+    
+def post_process_title(ai_output: str) -> str:
+    """
+    Extracts and cleans a proper product title from an AI response (ChatGPT or DeepSeek).
+    Looks for 'Name | Product Name' format and strips extra formatting.
+    """
+    if not ai_output:
+        return ""
+
+    # Remove markdown or HTML formatting like ** or <p>
+    cleaned_text = re.sub(r"(\*\*|<\/?p>)", "", ai_output).strip()
+
+    # Try to find a title like "Name | Product"
+    match = re.search(r"([A-ZÄÖÜ][a-zäöüß]+)\s*[\|–\-]\s*([A-ZÄÖÜa-zäöüß0-9 ,\-]+)", cleaned_text)
+    if match:
+        name, product = match.groups()
+        return f"{name.strip()} | {product.strip()}"
+
+    # Fallback: use the first line, trimmed
+    return cleaned_text.split("\n")[0].strip()
+
+
+# Inside the deepseek_translate_title function in translation.py
 
 def deepseek_translate_title(product_title: str, custom_prompt: str = "", target_language: str = "German") -> str:
     """Translate product title using DeepSeek API with formatting constraints."""
+    # --- ADD Check for client ---
+    if not deepseek_client:
+        logger.error("❌ DeepSeek client is not initialized. Cannot translate title.")
+        return product_title # Return original text if client not ready
+        
     if not product_title.strip():
         return product_title
 
+    # --- Simplified System Instructions ---
     system_instructions = (
-        f"You are an expert e-commerce copywriter and translator. "
-        f"Translate and rewrite product titles to be persuasive, SEO-friendly, and fully adapted to {target_language}. "
-        f"Follow the format '[Brand] | [Product Name]'.\n\n"
-        "- DO NOT add extra formatting characters.\n"
-        "- Keep '[Product Name]' under 4 words.\n"
-        "- Ensure the title is ≤ 20 tokens, ≤ 200 characters.\n"
+        f"Translate the following product title into {target_language}. "
+        f"Return ONLY the translated title in the exact format '[Human Name] | [Product Name]'. "
+        f"ABSOLUTELY DO NOT add any introductory text, notes, markdown, quotes, or explanations. "
+        f"Just output the final title string and nothing else."
     )
+    # --- End Simplified System Instructions ---
 
     user_content = f"""
     Original Title: {product_title}
 
-    User Modifications: {custom_prompt}
-
-    Translate and rewrite entirely into {target_language}, keeping structure and SEO focus.
+    Translate into {target_language}. Remember to only output the final title in the correct format.
     """
+    # (Keep custom_prompt if needed, maybe append to user_content: f"\nUser Modifications: {custom_prompt}")
 
     messages = [
         {"role": "system", "content": system_instructions},
@@ -420,63 +476,118 @@ def deepseek_translate_title(product_title: str, custom_prompt: str = "", target
     ]
 
     try:
-        response = client.chat.completions.create(
-            model="deepseek-chat",  # Updated model
+        # --- THIS IS THE LINE TO CHANGE ---
+        # Change 'client' to 'deepseek_client'
+        response = deepseek_client.chat.completions.create( 
+            model="deepseek-chat",
             messages=messages,
-            max_tokens=60
+            max_tokens=120
         )
+        # --- End of change ---
 
         translated_title = response.choices[0].message.content.strip()
-        logging.info("✅ DeepSeek Output:\n%s", translated_title)
+        logging.info("✅ DeepSeek Title Output:\n%s", translated_title) # Changed log message slightly
 
         return translated_title
 
     except Exception as e:
         logging.error(f"deepseek_translate_title error: {e}")
+        # Optional: Add specific NameError check like in the other function if needed
+        # if isinstance(e, NameError) and 'deepseek_client' in str(e):
+        #      logger.error("❌❌❌ It seems 'deepseek_client' was used but not defined correctly at the top of the file.")
         return product_title  # Fallback
 
+def deepseek_translate(
+    text: str,
+    custom_prompt: str = "",
+    target_language: str = "German",
+    style=None,
+    product_title: str = "" # Added product_title argument
+) -> str:
+    """
+    Translate product descriptions using the DeepSeek API, aiming for structured output.
 
-def deepseek_translate(text: str, custom_prompt: str = "", target_language: str = "German") -> str:
-    """Translate product descriptions using DeepSeek."""
+    Args:
+        text (str): The product description text to translate.
+        custom_prompt (str): Additional user instructions.
+        target_language (str): Target language (e.g., "German", "French").
+        style: Optional style parameter (currently unused in logic).
+        product_title (str): Optional product title for context.
+
+    Returns:
+        str: The translated text, ideally structured, or original text on failure.
+    """
+    # 1. Check if the deepseek_client was initialized
+    if not deepseek_client:
+        logger.error("❌ DeepSeek client is not initialized. Cannot translate using DeepSeek.")
+        return text # Return original text if client is not available
+
+    # 2. Check if input text is empty
     if not text.strip():
+        logger.warning("⚠️ Input text for DeepSeek translation is empty.")
         return text
 
+    # 3. Define System Instructions (asking for structured output)
     system_instructions = (
         "You are an expert e-commerce copywriter. Rewrite the product description "
-        f"into {target_language} in a structured format:\n\n"
-        "Product Title: [Enticing SEO title]\n"
-        "Short Introduction: [3–5 sentences]\n"
+        f"into fluent, persuasive {target_language} in a structured format exactly as follows:\n\n"
+        "Product Title: [Create an enticing, SEO-friendly title in the target language based on the original title/description]\n"
+        "Short Introduction: [Write 3–5 engaging sentences in the target language introducing the product]\n\n"
         "Product Advantages:\n"
-        "- [Feature]: [Benefit-driven explanation]\n"
-        "Call to Action: [Persuasive closing sentence]\n\n"
-        "Always follow this structure."
+        "- [Feature Name in target language]: [Benefit-driven detail in the target language explaining why the customer needs it.]\n"
+        "- [Feature Name in target language]: [Use power words like ‘luxurious’ or ‘perfect fit’ in the target language to create desire.]\n"
+        "- [Feature Name in target language]: [Link each feature to a real-life benefit in the target language. E.g. ‘Breathable fabric...’]\n"
+        "- (Add more relevant bullet points as needed based on the original description)\n\n"
+        "Call to Action: [Write a short, persuasive closing sentence in the target language]\n\n"
+        "**IMPORTANT**: Respond *only* with the structured text in {target_language}. Strictly follow this structure with the exact English labels (Product Title:, Short Introduction:, Product Advantages:, Call to Action:). Do not add any extra explanations before or after."
     )
 
+    # 4. Define User Content (providing original text and context)
     user_content = f"""
-    Original Description: {text}
+Original Description:
+{text}
 
-    {custom_prompt}
+Original Title (for context):
+{product_title}
 
-    Translate into {target_language} following the structured format.
-    """
+User Custom Instructions:
+{custom_prompt}
 
+Translate the original description into {target_language} following the structured format specified precisely.
+"""
+
+    # 5. Prepare messages for the API
     messages = [
         {"role": "system", "content": system_instructions},
         {"role": "user", "content": user_content}
     ]
 
+    # 6. Make the API Call
     try:
-        response = client.chat.completions.create(
+        logger.info(f"Attempting DeepSeek API call for description translation to {target_language}...")
+        response = deepseek_client.chat.completions.create( # Use deepseek_client
             model="deepseek-chat",
             messages=messages,
-            temperature=0.7,
-            max_tokens=1500
+            temperature=0.5, # Slightly lowered temperature for potentially better structure adherence
+            max_tokens=1500 # Adjust as needed
         )
 
-        translated_text = response.choices[0].message.content.strip()
-        logging.info("✅ DeepSeek Translation Output:\n%s", translated_text)
+        raw_output = response.choices[0].message.content.strip()
+        # Log the raw output critically for debugging formatting issues
+        logging.critical(f"🔥🔥🔥 RAW DeepSeek Output:\n---\n{raw_output}\n---")
+
+        translated_text = raw_output
+        logger.info(f"✅ DeepSeek Translation Output received (length: {len(translated_text)}).")
 
         return translated_text
+
+    # 7. Handle Exceptions
+    except Exception as e:
+        logger.error(f"❌ deepseek_translate error: {e}")
+        # Check if it's a NameError related to the client, although the check at the start should prevent this
+        if isinstance(e, NameError) and 'deepseek_client' in str(e):
+             logger.error("❌❌❌ It seems 'deepseek_client' variable was used but not properly defined/initialized.")
+        return text  # Fallback to original text on any error
 
     except Exception as e:
         logging.error(f"deepseek_translate error: {e}")

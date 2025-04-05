@@ -13,6 +13,21 @@ GOOGLE_SHEET_ID = "11PVJZkYeZfEtcuXZ7U4xiV1r_axgAIaSe88VgFF189E"
 
 import time  # optional for retry delay
 
+def process_google_sheet(file, image_column="A", starting_row=2):
+    import pandas as pd
+
+    # Read the uploaded file into a DataFrame
+    df = pd.read_excel(file) if file.filename.endswith(".xlsx") else pd.read_csv(file)
+
+    # Example: Count the number of non-empty rows starting from `starting_row`
+    df = df.iloc[starting_row - 1:]  # Adjust for 0-index
+    product_count = df.shape[0]
+
+    # Process the sheet logic here (placeholder)
+    # For example, extract titles, descriptions, translate, etc.
+
+    return product_count
+
 
 def get_pending_products_from_sheet():
     import gspread

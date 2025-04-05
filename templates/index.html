@@ -171,17 +171,29 @@
         <label class="form-label"><strong>Product Variants & Values</strong></label>
         <input type="checkbox" class="form-check-input" name="fields" value="variants" id="variantsField">
         <select class="form-select field-method" id="variantsMethod">
-          <option value="google">Google Translate</option>
-          <option value="deepseek">DeepSeek</option>
-          <option value="deepl">DeepL</option>
-          <option value="chatgpt">ChatGPT</option>
+            <option value="google">Google Translate</option>
+            <option value="deepseek">DeepSeek</option>
+            <option value="deepl">DeepL</option>
+            <option value="chatgpt">ChatGPT</option>
         </select>
         <div class="method-prompt" id="variantsPromptContainer">
-          <label class="form-label">Custom Prompt for Variants:</label>
-          <textarea id="variantsPrompt" class="form-control" rows="3" placeholder="E.g.: 'Translate variant names keeping size formats consistent'"></textarea>
-          <small class="text-muted">Applies to both ChatGPT and DeepSeek translations</small>
+            <label class="form-label">Custom Prompt for Variants:</label>
+            <textarea id="variantsPrompt" class="form-control" rows="3" placeholder="E.g.: 'Translate variant names keeping size formats consistent'"></textarea>
+            <small class="text-muted">Applies to both ChatGPT and DeepSeek translations</small>
         </div>
-      </div>
+    </div>
+    
+    <!-- Add a checkbox to trigger URL handle generation -->
+    <div>
+        <label for="generate_url_handle">Generate URL Handle for Translated Title</label>
+        <input type="checkbox" id="generate_url_handle" name="generate_url_handle">
+    </div>
+    
+    <!-- Button to trigger translation process -->
+    <button id="translateButton" class="btn btn-primary">Translate</button>
+    
+    <!-- Display the generated URL handle -->
+    <p id="generatedUrlHandle"></p>
     </form>
   </div>
 

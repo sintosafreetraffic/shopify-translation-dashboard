@@ -15,3 +15,12 @@ def slugify(text):
             .replace("/", "-")
             .replace("|", "-")
     )
+
+def extract_name_from_title(title: str) -> str:
+    """
+    Extracts the human name from a product title like 'Daisy | 3-Piece Lingerie Set'.
+    Returns the part before the pipe character.
+    """
+    if "|" in title:
+        return title.split("|")[0].strip()
+    return title.strip()
