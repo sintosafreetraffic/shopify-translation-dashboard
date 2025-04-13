@@ -163,21 +163,6 @@ function displayProducts(products) {
     <div>${cleanedDescription}</div>
   `;
 
-  // If you have images, insert the first two images at the end
-  if (product.images && product.images.length > 0) {
-    let image1 = product.images[0].src;
-    finalHtml += `
-      <div style="margin-top:1em;">
-        <img src="${image1}" style="width:480px; max-width:100%;"/>
-      </div>`;
-    if (product.images.length > 1) {
-      let image2 = product.images[1].src;
-      finalHtml += `
-        <div style="margin-top:1em;">
-          <img src="${image2}" style="width:480px; max-width:100%;"/>
-        </div>`;
-    }
-  }
 
   // Create the product card and inject finalHtml
   const productCard = document.createElement("div");

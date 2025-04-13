@@ -7,7 +7,7 @@ from variants_utils import get_product_option_values, update_product_option_valu
 from translation import deepseek_translate_title, deepl_translate, deepseek_translate, chatgpt_translate, chatgpt_translate_title
 import unicodedata
 import html
-
+from dotenv import load_dotenv
 load_dotenv()
 
 print("SHOPIFY_STORE_URL:", os.getenv("SHOPIFY_STORE_URL"))
@@ -21,6 +21,8 @@ import sqlite3
 import requests
 import json
 import logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 import re  # For simple HTML pattern matching
 from translation import chatgpt_translate, google_translate, deepl_translate
 from flask import Flask, render_template, request, jsonify
@@ -29,6 +31,51 @@ from variants_utils import get_product_option_values, update_product_option_valu
 from bs4 import BeautifulSoup  # Add this here
 from variants_utils import get_predefined_translation  # ✅ Import the function
 from google_sheets import process_google_sheet
+
+# --- CORRECTED IMPORT BLOCK ---
+try:
+    from product_actions import (
+        assign_product_type,
+        move_product_to_pinterest_collection,
+        get_ai_type_from_description, # Import this from product_actions
+        ALLOWED_PRODUCT_TYPES,        # Needed by get_ai_type_from_description
+        TARGET_COLLECTION_NAME,
+        SOURCE_COLLECTION_ID,   # <<<--- ADD THIS IMPORT (To access the configured ID)
+        SOURCE_COLLECTION_NAME # <<<--- ADD THIS IMPORT (For logging)        # Needed by move_product_to_pinterest_collection
+    )
+    logger.info("Successfully imported actions and AI type function from product_actions.py")
+except ImportError as e:
+    logger.error(f"❌ Failed to import required functions/constants from product_actions.py: {e}")
+    logger.error("Ensure product_actions.py exists, is in the Python path, and contains all necessary definitions.")
+    # Define dummy functions so the app doesn't crash immediately
+    def assign_product_type(*args, **kwargs): logger.error("Dummy assign_product_type called!"); return False
+    def move_product_to_pinterest_collection(*args, **kwargs): logger.error("Dummy move_product_to_pinterest_collection called!"); return False
+    def get_ai_type_from_description(*args, **kwargs): logger.error("DUMMY get_ai_type_from_description called!"); return None # Make dummy log clearer
+    def platform_api_remove_product_from_collection(*args, **kwargs): logger.error("Dummy platform_api_remove_product_from_collection called!"); return False
+    ALLOWED_PRODUCT_TYPES = set()
+    TARGET_COLLECTION_NAME = "Unknown"
+# --- END OF CORRECTED IMPORT BLOCK ---
+
+# ------------------------------ #
+# Logging Configuration
+# ------------------------------ #
+
+
+# ---> ADD THIS BLOCK <---
+try:
+    # Import gender detection and all name functions from random_name.py
+    from random_name import determine_product_gender, get_random_female_name, get_random_male_name, get_random_name
+    RANDOM_NAME_AVAILABLE = True
+    logger.info("✅ Successfully imported gender detector and random name generators.")
+except ImportError:
+    RANDOM_NAME_AVAILABLE = False
+    logger.warning("⚠️ random_name.py not found or critical functions missing. Gender check/name generation unavailable. Using fallbacks.")
+    # Define dummy functions if import fails
+    def determine_product_gender(product_data): return 'neutral' # Default gender
+    def get_random_name(): return "Product"
+    def get_random_female_name(): return "ProductF"
+    def get_random_male_name(): return "ProductM"
+
 
 def sanitize_shopify_product(product):
     # Clean options
@@ -55,8 +102,6 @@ def clean_html(html):
 # If your modules are located one directory up
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-
-
 # Custom modules
 from shopify_api import fetch_product_by_id, fetch_products_by_collection, update_product_translation
 from translation import chatgpt_translate, google_translate, deepl_translate, chatgpt_translate_title  # Extend as needed
@@ -79,11 +124,7 @@ SHOPIFY_STORE_URL=os.getenv("SHOPIFY_STORE_URL")
 if not SHOPIFY_STORE_URL or not SHOPIFY_API_KEY:
     raise ValueError("Missing Shopify credentials! Please set SHOPIFY_STORE_URL and SHOPIFY_API_KEY.")
     
-# ------------------------------ #
-# Logging Configuration
-# ------------------------------ #
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+
 
 # ------------------------------ #
 # Initialize Flask App
@@ -120,7 +161,7 @@ def init_db():
                 translated_description TEXT,
                 image_url TEXT,
                 batch TEXT,
-                status TEXT
+                status TEXT 
             )
         """)
         conn.commit()
@@ -187,7 +228,7 @@ def extract_name_from_title(title: str) -> str | None:
 logger = logging.getLogger(__name__)
 
 
-def post_process_description(original_html, new_html, method, product_data=None, target_lang='en', final_product_title=None, product_name=None): # <--- Added product_name
+def post_process_description(original_html, new_html, method, product_data=None, target_lang='en', final_product_title=None, product_name=None):
     """
     Post-process a translated product description:
     - ChatGPT & DeepSeek: Full formatting (title, intro, bullets, images, CTA).
@@ -220,236 +261,221 @@ def post_process_description(original_html, new_html, method, product_data=None,
         elif not name_to_use:
              logger.warning(f"[{current_product_id}] Cannot determine name: product_name not passed and no product_data.")
         else:
-             # Log the name being used if it was passed in
              logger.info(f"[{current_product_id}] Using explicitly passed product_name for consistency: '{name_to_use}'")
         # --- End Name Determination ---
 
 
         # --- HTML Cleaning ---
-        # logger.info(f"[{current_product_id}] 🧪 Before cleaning (post_process_description):\n{new_html[:500]}")
-        if new_html: # Check if new_html is not None or empty
+        if new_html:
              new_html = html.unescape(new_html)
-             # Remove checkmark emojis/variants and markdown bold
              new_html = re.sub(r'(&#x2714;|&#10003;|&#9989;|\u2714|\u2713|\u2705|✔️|✔|✓|✅)\s*', '', new_html)
-             new_html = re.sub(r'\*\*', '', new_html)  # Remove '**'
-             # logger.info(f"[{current_product_id}] 🧪 After cleaning (post_process_description):\n{new_html[:500]}")
+             new_html = re.sub(r'\*\*', '', new_html)
         else:
              logger.warning(f"[{current_product_id}] [post_process_description] new_html input was empty or None.")
-             return "" # Return empty if input is empty
+             return ""
 
 
         # --- Product image setup ---
         images = product_data.get("images", []) if product_data else []
         image1_url = images[0].get("src") if len(images) > 0 else ""
         image2_url = images[1].get("src") if len(images) > 1 else ""
-        # Add alt text using the consistent name
         alt_text_base = f"{name_to_use} product image" if name_to_use else "Product image"
 
 
         # --- CHATGPT / DEEPSEEK → Structured formatting ---
         if method_name in ["chatgpt", "deepseek"]:
+            logger.info(f"[{current_product_id}] DEBUG: Entering ChatGPT/DeepSeek processing block.")
             logger.info(f"[{current_product_id}] Parsing structured description (Method: {method_name}).")
-            # logger.info(f"[{current_product_id}] 🤔 Input to _parse_chatgpt_description:\n---\n{new_html}\n---") # Optional detailed log
             parsed = _parse_chatgpt_description(new_html)
+            parsed_features = parsed.get("features", [])
+            logger.info(f"[{current_product_id}] DEBUG: Parsed features result: {parsed_features}")
             logger.debug(f"[{current_product_id}] 📊 Output from _parse_chatgpt_description: {parsed}")
 
-            # *** Determine the H3 Title to use ***
-            description_h3_title = parsed.get("title", "").strip() # Get title parsed from description AI output
-            if final_product_title: # Check if a definitive final title was passed in
+            # *** Determine H3 Title ***
+            description_h3_title = parsed.get("title", "").strip()
+            if final_product_title:
                 if description_h3_title and description_h3_title != final_product_title:
                      logger.info(f"[{current_product_id}] Overriding description H3 ('{description_h3_title}') with final product title: '{final_product_title}'")
-                description_h3_title = final_product_title # Use the final title for the H3
+                description_h3_title = final_product_title
             elif not description_h3_title:
                 logger.warning(f"[{current_product_id}] No title in parsed description & no final_product_title provided. Using empty H3.")
-            # *** End H3 Title Determination ***
-
 
             # *** Inject/Replace Name using name_to_use ***
             if name_to_use:
                  # Introduction
                  intro_text = parsed.get("introduction", "")
                  if intro_text:
-                      modified_intro = intro_text # Start with original parsed intro
-                      # Example: Replace placeholder if found, otherwise log warning
-                      # Adjust regex to fit likely placeholders (e.g., capitalized word before "Set" or similar)
-                      match = re.search(r"\b([A-Z][a-z]{3,})\b(?=\s+(?:3-teilige|Set|Collection|Outfit|Mode|Kapuzenpullover|Lingerie|Dessous))", intro_text)
+                      modified_intro = intro_text
+                      # Regex to find likely placeholder (Capitalized word before common product type descriptors)
+                      match = re.search(r"\b([A-Z][a-z]{3,})\b(?=\s+(?:3-teilige|Set|Collection|Outfit|Mode|Kapuzenpullover|Lingerie|Dessous|Besteckset|Spitzenset))", intro_text)
                       placeholder_name_found = None
-                      if match:
-                            placeholder_name_found = match.group(1)
+                      if match: placeholder_name_found = match.group(1)
 
-                      # Only replace if a placeholder is found AND it's different from the target name
                       if placeholder_name_found and placeholder_name_found.lower() != name_to_use.lower():
                             logging.info(f"[{current_product_id}] Replacing name in parsed intro: '{placeholder_name_found}' -> '{name_to_use}'")
                             modified_intro = re.sub(r'\b' + re.escape(placeholder_name_found) + r'\b', name_to_use, intro_text, count=1)
-                      # Check if name is already present (case-insensitive) after potential replacement
                       elif name_to_use.lower() not in modified_intro.lower():
                             logging.warning(f"[{current_product_id}] Name '{name_to_use}' not found in intro & no clear placeholder replaced.")
-                            # Optional: Force inject name if missing entirely?
-                            # modified_intro = f"{name_to_use}: {modified_intro}"
-                      else: # Name seems present or no placeholder needed replacement
-                            pass # logging.debug(f"[{current_product_id}] Name '{name_to_use}' check complete for introduction.")
-                      parsed['introduction'] = modified_intro # Update the parsed dict
+                      parsed['introduction'] = modified_intro # Update dict
 
-
-                 # Features (Apply similar logic if names might appear here)
+                 # Features (less likely to need name, but include for completeness)
                  updated_features = []
-                 for feature in parsed.get("features", []):
+                 for feature in parsed_features: # Use the variable defined earlier
                       modified_feature = feature
-                      # Add replacement logic using name_to_use if needed for features
-                      # Example: modified_feature = re.sub(...)
+                      # Add similar replacement logic if needed, e.g., checking for placeholders in feature text
+                      # match_feature = re.search(...)
+                      # if match_feature and match_feature.group(1).lower() != name_to_use.lower():
+                      #    modified_feature = re.sub(...)
+                      #    logging.info(f"[{current_product_id}] Replacing name in feature: ...")
                       updated_features.append(modified_feature)
-                 parsed['features'] = updated_features
-
+                 parsed['features'] = updated_features # Update dict
 
             # --- Build HTML ---
             labels = _get_localized_labels(target_lang)
-            # Ensure _build_bullet_points uses the potentially updated features from parsed dict
-            bullet_html = _build_bullet_points(parsed.get("features", []))
+            bullet_html = _build_bullet_points(parsed.get("features", [])) # Use potentially updated features
+            logger.info(f"[{current_product_id}] DEBUG: Generated bullet_html (first 100 chars): {bullet_html[:100]}")
 
             final_html_parts = [
                 '<div style="text-align:center; margin:0 auto; max-width:800px;">',
-                # Use the definitive H3 title
                 f'<h3 style="font-weight:bold;">{description_h3_title}</h3>' if description_h3_title else "",
-                # Use the potentially updated introduction
-                f'<p>{parsed.get("introduction", "").strip()}</p>' if parsed.get("introduction", "").strip() else "",
+                f'<p>{parsed.get("introduction", "").strip()}</p>' if parsed.get("introduction", "").strip() else "", # Use updated intro
             ]
 
             if image1_url:
                 final_html_parts.append(
-                    f"<div style='margin:1em 0;'><img src='{image1_url}' style='width:480px; max-width:100%;' loading='lazy' alt='{alt_text_base} 1'/></div>" # Added alt text
+                    f"<div style='margin:1em 0;'><img src='{image1_url}' style='width:480px; max-width:100%;' loading='lazy' alt='{alt_text_base} 1'/></div>"
                 )
 
-            if bullet_html: # Only add bullet section if bullets exist
+            # --- Bullet Point Section ---
+            # --- Add this NEW structure for the list ---
+            if bullet_html:
                 final_html_parts += [
-                    f'<h4 style="font-weight:bold;">{labels.get("advantages", "Product Advantages")}</h4>',
-                    # Use your preferred styling for centered list items
-                    '<ul style="list-style-position: inside; text-align: left; display: inline-block;">',
-                    bullet_html,
-                    '</ul>',
-                ]
+                    # Keep your H4 heading for "Product Advantages"
+                    f'<h4 class="advantages-heading" style="font-weight:bold; margin-top: 1.5em; margin-bottom: 0.5em;">{labels.get("advantages", "Product Advantages")}</h4>',
 
+                    # ---> ADDED WRAPPER DIV <---
+                    # This div centers the list block itself because it's inline-block
+                    # within a text-align:center parent. text-align:left keeps list text readable.
+                    '<div class="centered-list-wrapper" style="display: inline-block; text-align: left;">',
+
+                        # The UL inside the wrapper. Keep necessary list styles.
+                        # Padding creates space for bullets; margin:0 removes default space.
+                        '<ul class="advantages-list" style="list-style-position: outside; padding-left: 1.5em; margin: 0;">',
+                            bullet_html, # Your generated <li> items
+                        '</ul>',
+
+                    '</div>', # ---> CLOSE WRAPPER DIV <---
+                    # ---> END ADDED WRAPPER <---
+                ]
+            # --- End New Structure ---
+            else:
+                logger.info(f"[{current_product_id}] DEBUG: Skipping bullet point section (bullet_html is empty).")
+            # --- End Bullet Point Section ---
+            
             if image2_url:
                 final_html_parts.append(
-                    f"<div style='margin:2em 0;'><img src='{image2_url}' style='width:480px; max-width:100%;' loading='lazy' alt='{alt_text_base} 2'/></div>" # Added alt text
+                    f"<div style='margin:2em 0;'><img src='{image2_url}' style='width:480px; max-width:100%;' loading='lazy' alt='{alt_text_base} 2'/></div>"
                 )
 
-            # Use CTA parsed from description, or fallback label
             cta_html = parsed.get('cta', '').strip() or labels.get('cta', 'Jetzt entdecken!')
-            if cta_html: # Only add CTA if it exists
+            if cta_html:
                  final_html_parts.append(
                      f'<h4 style="font-weight:bold; margin:1.5em 0; font-size:1.2em;">{cta_html}</h4>'
                  )
 
             final_html_parts.append('</div>')
 
-            logging.info(f"✅ [{current_product_id}] ChatGPT/DeepSeek HTML built successfully.")
-            # Filter out potential empty strings from parts before joining
-            return "\n".join(filter(None, final_html_parts)).strip()
+            final_html_output = "\n".join(filter(None, final_html_parts)).strip()
+            logger.info(f"✅ [{current_product_id}] DEBUG: Final HTML output (ChatGPT/DeepSeek):\n'''\n{final_html_output}\n'''")
+            return final_html_output
 
         # --- GOOGLE / DEEPL → Clean + inject images + inject name ---
         elif method_name in ["google", "deepl"]:
             logger.info(f"[{current_product_id}] Processing Google/DeepL output.")
-
             soup = BeautifulSoup(new_html, "html.parser")
 
             # Remove old <img> tags
             img_removed_count = 0
             for img in soup.find_all('img'):
-                img.decompose()
-                img_removed_count += 1
+                img.decompose(); img_removed_count += 1
             if img_removed_count > 0:
-                 logger.info(f"[{current_product_id}] Removed {img_removed_count} pre-existing img tag(s) from Google/DeepL output.")
+                 logger.info(f"[{current_product_id}] Removed {img_removed_count} pre-existing img tag(s).")
 
             # *** Inject/Replace Name using name_to_use ***
             if name_to_use:
                    replaced_in_para = False
-                   for p in soup.find_all("p"): # Iterate through paragraphs
-                       original_text = p.get_text()
-                       # Example replacement logic: Find capitalized word before common product type words
-                       match = re.search(r"\b([A-Z][a-z]{3,})\b(?=\s+(?:3-teilige|Set|Collection|Outfit|Mode|Kapuzenpullover|Lingerie|Dessous))", original_text)
-                       placeholder_name_found = None
-                       if match:
-                           placeholder_name_found = match.group(1)
+                   # Iterate through likely text containers
+                   for tag in soup.find_all(['p', 'li', 'span', 'div']): # Add other relevant tags if needed
+                       if not tag.string: continue # Skip tags with no direct string content
 
-                       # Only replace if placeholder found and different from target name
+                       original_text = tag.string.strip()
+                       if not original_text: continue # Skip empty strings
+
+                       # Example replacement logic: Find capitalized word before common product type words
+                       match = re.search(r"\b([A-Z][a-z]{3,})\b(?=\s+(?:3-teilige|Set|Collection|Outfit|Mode|Kapuzenpullover|Lingerie|Dessous|Besteckset|Spitzenset))", original_text)
+                       placeholder_name_found = None
+                       if match: placeholder_name_found = match.group(1)
+
                        if placeholder_name_found and placeholder_name_found.lower() != name_to_use.lower():
                            new_text = re.sub(r'\b' + re.escape(placeholder_name_found) + r'\b', name_to_use, original_text, count=1)
-                           logging.info(f"[{current_product_id}] Replacing name in G/D paragraph using '{name_to_use}': '{placeholder_name_found}' -> '{name_to_use}'")
-                           # Replace content carefully - this assumes simple <p>Text</p>
-                           # More complex paragraphs might need smarter replacement
-                           p.string = new_text
+                           logging.info(f"[{current_product_id}] Replacing name in G/D {tag.name}: '{placeholder_name_found}' -> '{name_to_use}'")
+                           tag.string.replace_with(new_text) # Use replace_with for NavigableString
                            replaced_in_para = True
-                           break # Stop after first replacement (optional)
-                       # Optional: Check if name is missing entirely if no placeholder found
-                       elif name_to_use.lower() not in original_text.lower():
-                            logger.warning(f"[{current_product_id}] Name '{name_to_use}' not found in G/D paragraph and no clear placeholder identified.")
+                           # Consider breaking or continuing based on desired behavior
+                       elif name_to_use.lower() not in original_text.lower() and tag.name == 'p': # Only check primary paragraphs for absence
+                            # This warning might be too noisy, consider removing or making debug level
+                            logger.debug(f"[{current_product_id}] Name '{name_to_use}' not found in G/D paragraph and no placeholder replaced: '{original_text[:50]}...'")
 
                    if replaced_in_para:
                         logger.info(f"[{current_product_id}] Name replacement applied to Google/DeepL output.")
 
 
-            # Inject images (Your existing logic for G/D image injection)
-            paragraphs = soup.find_all('p') # Re-find paragraphs after potential modification
-            if paragraphs and image1_url:
-                if not soup.find('img', src=image1_url):
-                    # Inject image 1 after first paragraph (simplest G/D approach)
+            # --- Inject images ---
+            paragraphs = soup.find_all('p') # Re-find paragraphs
+            if paragraphs and image1_url and not soup.find('img', src=image1_url):
                     img_div_1 = soup.new_tag('div', style='text-align:center; margin:1em 0;')
                     img_1 = soup.new_tag('img', src=image1_url, style='width:480px; max-width:100%;', loading='lazy', alt=f'{alt_text_base} 1')
                     img_div_1.append(img_1)
-                    paragraphs[0].insert_after(img_div_1)
+                    paragraphs[0].insert_after(img_div_1) # Insert after first paragraph
                     logging.info(f"✅ [{current_product_id}] Inserted first image (Google/DeepL).")
 
-            if image2_url:
-                 if not soup.find('img', src=image2_url):
-                    # Inject image 2 before last paragraph (simplest G/D approach)
+            if image2_url and not soup.find('img', src=image2_url):
                     last_p = soup.find_all('p')[-1] if soup.find_all('p') else None
                     img_div_2 = soup.new_tag('div', style='text-align:center; margin:2em 0;')
                     img_2 = soup.new_tag('img', src=image2_url, style='width:480px; max-width:100%;', loading='lazy', alt=f'{alt_text_base} 2')
                     img_div_2.append(img_2)
                     if last_p and hasattr(last_p, 'insert_before'):
-                         try:
-                              last_p.insert_before(img_div_2)
-                              logging.info(f"✅ [{current_product_id}] Inserted second image before last p (Google/DeepL).")
-                         except Exception as insert_err:
-                              logging.warning(f"[{current_product_id}] Could not insert image 2 before last p, appending: {insert_err}")
-                              soup.append(img_div_2) # Fallback append
-                    else: # No paragraphs or can't insert before
-                         soup.append(img_div_2) # Fallback append
-                         logging.warning(f"⚠️ [{current_product_id}] Inserted second image at end (Google/DeepL fallback - no last p).")
+                         try: last_p.insert_before(img_div_2); logging.info(f"✅ [{current_product_id}] Inserted second image (Google/DeepL).")
+                         except Exception as insert_err: soup.append(img_div_2); logging.warning(f"[{current_product_id}] Failed image 2 insert, appended: {insert_err}")
+                    else: soup.append(img_div_2); logging.warning(f"⚠️ [{current_product_id}] Appended second image (Google/DeepL fallback - no last p).")
 
-
-            # Ensure final structure has the main centered div wrapper
-            # (Using simplified logic from your version)
+            # --- Final wrapping ---
             final_inner_html = str(soup)
-            # Check if direct wrapper exists
             direct_wrapper = soup.find('div', recursive=False, style=lambda v: v and 'max-width:800px' in v)
             if not direct_wrapper:
-                 body = soup.find('body')
-                 content_root = body if body else soup
+                 body = soup.find('body'); content_root = body if body else soup
                  if not content_root.name == 'div' or 'max-width:800px' not in content_root.get('style',''):
                       logging.info(f"[{current_product_id}] Adding final wrapper div for Google/DeepL.")
                       final_inner_html = f'<div style="text-align: center; margin: 0 auto; max-width: 800px;">{content_root.decode_contents()}</div>'
-                 else: # Root already has style
-                      final_inner_html = str(content_root)
+                 else: final_inner_html = str(content_root)
 
-            logging.info(f"✅ [{current_product_id}] Final HTML generated (Google/DeepL).")
+            logger.info(f"✅ [{current_product_id}] Final HTML generated (Google/DeepL).")
             return final_inner_html.strip()
 
         else:
-            # Fallback for unknown method
-            logger.warning(f"⚠️ [{current_product_id}] Unknown method '{method_name}' reached end of post_process_description.")
+            logger.warning(f"⚠️ [{current_product_id}] Unknown method '{method_name}'.")
             return new_html # Return cleaned HTML
 
     except Exception as e:
         logger.exception(f"❌ [{product_data.get('id', 'UnknownID') if product_data else 'UnknownID'}] [post_process_description] Exception occurred: {e}")
         # Attempt to return cleaned HTML as fallback
         try:
-             cleaned_fallback = html.unescape(new_html)
-             cleaned_fallback = re.sub(r'(&#x2714;|&#10003;|...)\s*', '', cleaned_fallback) # Add relevant entities back
+             cleaned_fallback = html.unescape(new_html or "")
+             cleaned_fallback = re.sub(r'(&#x2714;|&#10003;|...)\s*', '', cleaned_fallback) # Ensure entities list is correct
              cleaned_fallback = re.sub(r'\*\*', '', cleaned_fallback)
              return cleaned_fallback.strip()
         except:
-             return new_html if new_html else "" # Absolute fallback
+             return new_html if new_html else ""
         
 def post_process_title(ai_output: str) -> str:
     """
@@ -635,6 +661,106 @@ def _parse_chatgpt_description(ai_text):
 
     return parsed_data
 
+# --- Ensure _get_localized_labels and _build_bullet_points are defined/imported ---
+def _get_localized_labels(target_lang): # Placeholder
+    return {'advantages': 'Product Advantages', 'cta': 'Buy Now'}
+def _build_bullet_points(features): # Placeholder
+    return "\n".join([f"<li>{f}</li>" for f in features])
+def _get_first_two_images(product_data): # Placeholder Helper
+     if not product_data or 'images' not in product_data: return "", ""
+     imgs = product_data['images']; img1 = imgs[0].get('src','') if len(imgs)>0 else ""; img2 = imgs[1].get('src','') if len(imgs)>1 else ""; return img1, img2
+
+
+# --- Main Function ---
+def post_process_description(original_html, new_html, method, product_data=None, target_lang='en', final_product_title=None, product_name=None):
+    """
+    Post-process description. Applies structure for ChatGPT AND DeepSeek.
+    """
+    current_product_id = product_data.get("id", "UnknownID") if product_data else "UnknownID"
+    logger.info(f"[{current_product_id}] === ENTERING post_process_description (Method received: '{method}') ===")
+    try:
+        # Normalize method name
+        if isinstance(method, dict): method_name = method.get("method", "").lower()
+        else: method_name = str(method).lower()
+        logger.info(f"[{current_product_id}] Normalized method_name: '{method_name}'")
+
+        # Determine Name
+        name_to_use = product_name # ... (keep your name logic) ...
+        logger.info(f"[{current_product_id}] Using name: '{name_to_use}'")
+
+        # HTML Cleaning
+        if new_html: new_html = html.unescape(re.sub(r'\*\*', '', new_html)); # Simplified
+        else: return ""
+
+        # Image Setup
+        image1_url, image2_url = _get_first_two_images(product_data)
+        alt_text_base = f"{name_to_use} product image" if name_to_use else "Product image"
+
+        # --->>> CORRECTED CONDITION BELOW <<<---
+        if method_name in ["chatgpt", "deepseek"]:
+            logger.info(f"[{current_product_id}] Applying structured formatting for {method_name}.")
+
+            # Ensure robust parser is called
+            parsed = _parse_chatgpt_description(new_html)
+            logger.info(f"[{current_product_id}] DEBUG: Parsed features count: {len(parsed.get('features',[]))}")
+
+            if not parsed.get('introduction') and not parsed.get('features'):
+                 logger.error(f"[{current_product_id}] PARSING FAILED for {method_name}.")
+                 return new_html # Return cleaned raw text if parse fails
+
+            # Determine H3 Title
+            description_h3_title = parsed.get("title", "").strip()
+            if final_product_title: description_h3_title = final_product_title
+            elif not description_h3_title: logger.warning(f"[{current_product_id}] No title determined for H3.")
+
+            # Inject/Replace Name if needed
+            if name_to_use:
+                 # Apply your name replacement logic to parsed['introduction'] / parsed['features']
+                 pass # Placeholder for your name injection logic
+
+            # Build HTML structure
+            labels = _get_localized_labels(target_lang)
+            bullet_html = _build_bullet_points(parsed.get("features", []))
+
+            # Using the CORRECT centering structure for bullets
+            final_html_parts = [
+                '<div style="text-align:center; margin:0 auto; max-width:800px;">',
+                f'<h3 style="font-weight:bold;">{description_h3_title}</h3>' if description_h3_title else "",
+                f'<p>{parsed.get("introduction", "").strip()}</p>' if parsed.get("introduction", "").strip() else "",
+                (f"<div style='margin:1em 0;'><img src='{image1_url}' style='width:480px; max-width:100%;' loading='lazy' alt='{alt_text_base} 1'/></div>" if image1_url else ""),
+            ]
+            if bullet_html:
+                final_html_parts += [
+                    f'<h4 class="advantages-heading" style="font-weight:bold; margin-top: 1.5em; margin-bottom: 0.5em;">{labels.get("advantages", "Product Advantages")}</h4>',
+                    '<div class="centered-list-wrapper" style="display: inline-block; text-align: left;">',
+                    '<ul class="advantages-list" style="list-style-position: outside; padding-left: 1.5em; margin: 0;">',
+                    bullet_html, '</ul>', '</div>'
+                ]
+            if image2_url: final_html_parts.append(f"<div style='margin:2em 0;'><img src='{image2_url}' style='width:480px; max-width:100%;' loading='lazy' alt='{alt_text_base} 2'/></div>")
+            cta_html = parsed.get('cta', '').strip() or labels.get('cta', 'Jetzt entdecken!')
+            if cta_html: final_html_parts.append(f'<h4 style="font-weight:bold; margin:1.5em 0; font-size:1.2em;">{cta_html}</h4>')
+            final_html_parts.append('</div>')
+
+            final_html_output = "\n".join(filter(None, final_html_parts)).strip()
+            logger.info(f"✅ [{current_product_id}] Built structured HTML ({method_name}). Length: {len(final_html_output)}")
+            return final_html_output
+
+        else: # Fallback for Google, DeepL, others
+            logger.info(f"[{current_product_id}] Using basic image injection path for method '{method_name}'.")
+            # ... (Keep your existing BeautifulSoup logic for Google/DeepL here) ...
+            soup = BeautifulSoup(new_html, "html.parser"); # Example start
+            # ... logic to remove existing images ...
+            # ... logic to inject image1_url / image2_url ...
+            # ... logic to wrap in centered div ...
+            final_wrapped_html = f'<div style="text-align: center; margin: 0 auto; max-width: 800px;">{str(soup)}</div>' # Example wrap
+            logger.info(f"✅ [{current_product_id}] Finished basic processing ({method_name}).")
+            return final_wrapped_html.strip()
+
+    except Exception as e:
+        logger.exception(f"❌ [{current_product_id}] Exception in post_process_description: {e}")
+        # Fallback
+        try: return html.unescape(new_html or "").strip()
+        except: return new_html if new_html else ""
 
 def _get_localized_labels(target_lang):
     """Localizes 'Product Advantages' heading and a fallback CTA."""
@@ -665,7 +791,7 @@ def _build_bullet_points(features):
         line = re.sub(r"\*\*(.*?)\*\*", r"\1", line)
 
         # Optional: bold up to first colon/dash
-        parts = re.split(r'[:\-]', line, 1)
+        parts = re.split(r'[:\-]', line, maxsplit=1) # Use keyword argument
         if len(parts) == 2:
             bold, rest = parts
             bullet_li_list.append(f"<li><strong>{bold.strip()}</strong>: {rest.strip()}</li>")
@@ -887,7 +1013,7 @@ def fetch_products_by_collection():
 
         # We fetch "images" too, in case we want them for post-processing
         url = (
-            f"https://{SHOPIFY_STORE_URL}/admin/api/2023-04/products.json"
+            f"{ensure_https(SHOPIFY_STORE_URL)}/admin/api/2024-04/products.json" # Use ensure_https and updated API Version
             f"?collection_id={collection_id}&fields=id,title,body_html,image,images"
         )
         resp = shopify_request("GET", url)
@@ -920,7 +1046,7 @@ def fetch_variants():
         if not product_id:
             return jsonify({"error": "No product ID provided"}), 400
 
-        url = f"https://{SHOPIFY_STORE_URL}/admin/api/2023-04/products/{product_id}/variants.json"
+        url = f"{ensure_https(SHOPIFY_STORE_URL)}/admin/api/2023-04/products/{product_id}/variants.json"
         resp = shopify_request("GET", url)
         if resp.status_code != 200:
             return jsonify({"error": "Failed to fetch variants from Shopify."}), 500
@@ -961,7 +1087,7 @@ def test_product():
     try:
         test_product_id = os.getenv("TEST_PRODUCT_ID", "1234567890")
         url = (
-            f"https://{SHOPIFY_STORE_URL}/admin/api/2023-04/products/{test_product_id}.json"
+            f"{ensure_https(SHOPIFY_STORE_URL)}/admin/api/2023-04/products/{test_product_id}.json"
             f"?fields=id,title,body_html,handle,tags,metafields,variants,images"
         )
         resp = shopify_request("GET", url)
@@ -977,7 +1103,7 @@ def test_product():
         logger.exception(e)
         return jsonify({"error": str(e)}), 500
     
-def clean_title_output(title):
+def clean_title_output(title, required_name=None):
     """
     Cleans AI-generated titles: removes common prefixes, placeholders, extra punctuation,
     and handles incomplete endings. Includes robust regex handling.
@@ -1046,6 +1172,21 @@ def clean_title_output(title):
     # 4. Remove parentheses (just the symbols)
     title = title.replace('(', '').replace(')', '')
 
+    if required_name and "|" in title:
+        parts = title.split("|", 1)
+        current_name = parts[0].strip()
+        product_part = parts[1].strip() if len(parts) > 1 else ""
+        if current_name != required_name:
+            logger.warning(f"clean_title_output: Enforcing required name '{required_name}' over '{current_name}'")
+            title = f"{required_name} | {product_part}"
+        else:
+            # Ensure correct spacing even if name was correct
+            title = f"{required_name} | {product_part}"
+    elif required_name and title and "|" not in title:
+        # If no pipe separator, maybe the AI failed format. Force it.
+        logger.warning(f"clean_title_output: Title '{title}' missing separator. Forcing format with required name '{required_name}'.")
+        title = f"{required_name} | {title}" # Assumes rest of title is the product part
+
     # 5. Remove common trailing punctuation and consolidate internal spaces
     # Added hyphen '-' to the list of characters to remove from the end
     title = title.strip().rstrip(",.;:!?-") 
@@ -1090,6 +1231,7 @@ def translate_test_product():
     
         source_lang = data.get("source_language", "auto")
         target_lang = data.get("target_language", "de")
+        chosen_random_name_for_product = None
 
         # --- Input Validation ---
         if not fields_to_translate:
@@ -1154,7 +1296,8 @@ def translate_test_product():
                     title = chatgpt_translate_title(
                         product_data.get("title", ""), # Pass original (potentially dirty) title
                         custom_prompt=prompt_title,
-                        target_language=target_lang
+                        target_language=target_lang,
+                        required_name=chosen_random_name_for_product # <<< ADD THIS ARGUMENT
                     )
                     logging.info(f" Result from chatgpt_translate_title: '{title}'")
                     # Apply basic cleaning needed after ChatGPT if any (optional)
@@ -1167,8 +1310,7 @@ def translate_test_product():
                     raw_title_output = deepseek_translate_title(
                         product_data.get("title", ""),
                         target_language=target_lang,
-                        # style="ecommerce" # Uncomment if you pass style
-                        # custom_prompt=prompt_title # Uncomment if you pass prompt
+                        required_name=chosen_random_name_for_product # <<< ADD THIS ARGUMENT
                     )
                     # Log the exact raw output BEFORE any processing
                     logging.info(f"🧪 Raw DeepSeek Title Output (before post-processing):\n'''{raw_title_output}'''")
@@ -1198,7 +1340,8 @@ def translate_test_product():
                 # --- Common Title Post-Processing (after method-specific translation) ---
                 logging.info(f" Calling clean_title_output on: '{title}'") # Log input to next step
                 # Make sure clean_title_output function is defined and handles potential empty strings
-                title = clean_title_output(title if title else "")
+                # Pass the chosen name to the cleaner function as well
+                title = clean_title_output(title if title else "", required_name=chosen_random_name_for_product) # <<< ADD THIS ARGUMENT                
                 logging.info(f" Result from clean_title_output: '{title}'")
 
 
@@ -1285,9 +1428,9 @@ def translate_test_product():
                     logging.info(f" Calling translation function for body_html (method: {chosen_method})...")
                     # --- Direct calls based on method string ---
                     if chosen_method == "chatgpt":
-                         translated = chatgpt_translate(original_value, custom_prompt=prompt, target_language=target_lang, product_title=final_processed_title)
+                         translated = chatgpt_translate(original_value, custom_prompt=prompt, target_language=target_lang, product_title=final_processed_title, required_name=chosen_random_name_for_product)
                     elif chosen_method == "deepseek":
-                         translated = deepseek_translate(original_value, custom_prompt=prompt, target_language=target_lang, product_title=final_processed_title)
+                         translated = deepseek_translate(original_value, custom_prompt=prompt, target_language=target_lang, product_title=final_processed_title, required_name=chosen_random_name_for_product)
                     elif chosen_method == "google":
                          translated = google_translate(original_value, source_language=source_lang, target_language=target_lang)
                     elif chosen_method == "deepl":
@@ -1308,7 +1451,8 @@ def translate_test_product():
                         method=chosen_method, # Pass method name string
                         product_data=product_data, 
                         target_lang=target_lang,
-                        final_product_title=final_processed_title # Pass the definitive title
+                        final_product_title=final_processed_title,
+                        product_name=chosen_random_name_for_product #  # Pass the definitive title
                     )
                     # --- End ADD ---
                     logging.info(f" Result from post_process_description: {final_description[:200]}...") 
@@ -1466,7 +1610,7 @@ def translate_test_product():
             put_payload["product"] = sanitize_shopify_product(put_payload["product"])
 
         # ✅ Log final payload before sending
-            url_put = f"https://{SHOPIFY_STORE_URL}/admin/api/2023-04/products/{product_id}.json"
+            url_put = f"{BASE_URL}/admin/api/2023-04/products/{product_id}.json"
             update_resp = shopify_request("PUT", url_put, json=put_payload)
 
             # ✅ Log Shopify's response
@@ -1520,6 +1664,7 @@ def translate_collection_fields():
         source_lang = data.get("source_language", "auto")
         prompt_title = data.get("prompt_title", "")
         prompt_desc = data.get("prompt_desc", "")
+        chosen_random_name_for_product = None
         # prompt_variants = data.get("prompt_variants", "") # If needed
 
         # --- Input Validation ---
@@ -1533,12 +1678,11 @@ def translate_collection_fields():
             logger.error(error_msg)
             return jsonify({"error": error_msg}), 400
         logger.info(f"Bulk translate request for collection {collection_id}, fields: {fields_to_translate}, methods: {field_methods}")
-
         # --- Fetch products ---
         # Fetch required fields, including handle if needed for comparison or update
         fetch_fields = "id,title,body_html,handle,images,variants,options"
         url = (
-            f"https://{SHOPIFY_STORE_URL}/admin/api/2023-04/products.json"
+            f"{ensure_https(SHOPIFY_STORE_URL)}/admin/api/2023-04/products.json"
             f"?collection_id={collection_id}&fields={fetch_fields}"
             # Add limit if needed: &limit=250
         )
@@ -1567,6 +1711,13 @@ def translate_collection_fields():
             original_title = product_data.get("title", "")
             original_body = product_data.get("body_html", "")
             original_handle = product_data.get("handle", "")
+             # ... (after initializing product_id, original_title, original_body etc.) ...
+            logger.debug(f"--- Starting processing for Product ID: {product_id} ---") # ADDED DEBUG
+
+            # --->>> STEP 1: DETERMINE GENDER <<<---
+            product_gender = determine_product_gender(product_data) # Call the function from random_name.py
+            logger.info(f"[{product_id}] Determined Product Gender: {product_gender}")
+        # --->>> END STEP 1 <<<---
 
             logger.info(f"🔁 Translating product {idx+1}/{len(products)}: ID {product_id} ('{original_title[:50]}...') Handle: '{original_handle}'")
 
@@ -1575,18 +1726,56 @@ def translate_collection_fields():
             final_processed_title = None # Reset definitive title for THIS product
             name_for_this_product = None # Reset definitive name for THIS product
 
+                # ---> ADD THIS BLOCK (Select Random Name) <---
+            # --->>> STEP 2: SELECT RANDOM NAME BASED ON GENDER (REPLACES old selection block) <<<---
+            if RANDOM_NAME_AVAILABLE:
+                try:
+                    if product_gender == 'female':
+                        chosen_random_name_for_product = get_random_female_name()
+                    elif product_gender == 'male':
+                        chosen_random_name_for_product = get_random_male_name()
+                    else: # 'neutral' or fallback from determine_product_gender
+                        chosen_random_name_for_product = get_random_name() # Use mixed list
+
+                    if not chosen_random_name_for_product: raise ValueError("Random name generator returned empty.")
+                    logger.info(f"[{product_id}] Chosen random name ({product_gender}): '{chosen_random_name_for_product}'")
+
+                except Exception as name_gen_err:
+                    logger.error(f"[{product_id}] Failed to get random name ({product_gender}): {name_gen_err}. Using fallback.")
+                    # --- Fallback logic (using original name extraction) ---
+                    try:
+                        cleaned_title_for_name = re.sub(r"<.*?>|\(Note:.*?\)|:\s*$", "", original_title, flags=re.IGNORECASE).strip()
+                        extracted_name = extract_name_from_title(cleaned_title_for_name)
+                        chosen_random_name_for_product = extracted_name if extracted_name else "Product"
+                        logger.info(f"[{product_id}] Using fallback extracted/default name: '{chosen_random_name_for_product}'")
+                    except Exception as fallback_name_err:
+                        logger.error(f"[{product_id}] Fallback name extraction failed: {fallback_name_err}")
+                        chosen_random_name_for_product = "Product" # Ultimate fallback
+            else: # Random name module not available
+                # --- Fallback logic (using original name extraction) ---
+                logger.warning(f"[{product_id}] Random name generation unavailable. Using fallback.")
+                try:
+                    cleaned_title_for_name = re.sub(r"<.*?>|\(Note:.*?\)|:\s*$", "", original_title, flags=re.IGNORECASE).strip()
+                    extracted_name = extract_name_from_title(cleaned_title_for_name)
+                    chosen_random_name_for_product = extracted_name if extracted_name else "Product"
+                    logger.info(f"[{product_id}] Using fallback extracted/default name: '{chosen_random_name_for_product}'")
+                except Exception as fallback_name_err:
+                    logger.error(f"[{product_id}] Fallback name extraction failed: {fallback_name_err}")
+                    chosen_random_name_for_product = "Product"
+    # --->>> END STEP 2 (Replaced Block) <<<---
+            # ---> END ADD <--
             # --- Extract Name ONCE per product (Critical Step) ---
-            try:
-                if original_title:
+            #try:
+            #    if original_title:
                     # Clean original title before extracting name
-                    cleaned_title_for_name = re.sub(r"<.*?>|\(Note:.*?\)", "", original_title).strip()
+             #       cleaned_title_for_name = re.sub(r"<.*?>|\(Note:.*?\)", "", original_title).strip()
                     # Ensure extract_name_from_title function is available and robust
-                    name_for_this_product = extract_name_from_title(cleaned_title_for_name)
-                    logger.info(f"[{product_id}] Extracted name for current iteration: '{name_for_this_product}'")
-                else:
-                    logger.warning(f"[{product_id}] Cannot extract name, original title is empty.")
-            except Exception as name_exc:
-                logger.error(f"[{product_id}] Failed to extract name: {name_exc}")
+              #      name_for_this_product = extract_name_from_title(cleaned_title_for_name)
+             #       logger.info(f"[{product_id}] Extracted name for current iteration: '{name_for_this_product}'")
+            #    else:
+            #        logger.warning(f"[{product_id}] Cannot extract name, original title is empty.")
+            #except Exception as name_exc:
+             #   logger.error(f"[{product_id}] Failed to extract name: {name_exc}")
                 # Decide how critical this is - maybe allow processing to continue without name?
 
             # Set a fallback title initially (cleaned original)
@@ -1594,7 +1783,6 @@ def translate_collection_fields():
             current_title_for_processing = original_title
             if original_title:
                 current_title_for_processing = re.sub(r"<.*?>|\(Note:.*?\)", "", original_title).strip()
-
 
             # --- TITLE Processing ---
             if "title" in fields_to_translate:
@@ -1607,9 +1795,9 @@ def translate_collection_fields():
                         logger.warning(f"  [{product_id}] Skipping title: Original is empty.")
                     # --- Method-specific translation calls ---
                     elif chosen_method == "chatgpt":
-                        translated_title_raw = chatgpt_translate_title(original_title, custom_prompt=prompt, target_language=target_lang)
+                        translated_title_raw = chatgpt_translate_title(original_title, custom_prompt=prompt, target_language=target_lang, required_name=chosen_random_name_for_product)
                     elif chosen_method == "deepseek":
-                        raw_output = deepseek_translate_title(original_title, custom_prompt=prompt, target_language=target_lang)
+                        raw_output = deepseek_translate_title(original_title, custom_prompt=prompt, target_language=target_lang, required_name=chosen_random_name_for_product)
                         translated_title_raw = post_process_title(raw_output) # post_process_title cleans DeepSeek output
                     elif chosen_method == "google":
                          translated_title_raw = google_translate(original_title, source_language=source_lang, target_language=target_lang)
@@ -1625,7 +1813,7 @@ def translate_collection_fields():
                     # --- Cleaning and Constraints ---
                     if translated_title_raw:
                          logger.info(f"  [{product_id}] Raw translated title: '{translated_title_raw[:60]}...'")
-                         cleaned_title = clean_title_output(translated_title_raw) # Ensure clean_title_output exists
+                         cleaned_title = clean_title_output(translated_title_raw, required_name=chosen_random_name_for_product) # <<< ADD ARGUMENT HERE
                          logger.info(f"  [{product_id}] Cleaned title: '{cleaned_title[:60]}...'")
 
                          # Apply constraints (e.g., length, word count, format)
@@ -1679,9 +1867,9 @@ def translate_collection_fields():
                          logger.warning(f"  [{product_id}] Skipping body: Original is empty.")
                     # --- Method-specific calls ---
                     elif chosen_method == "chatgpt":
-                         translated_body = chatgpt_translate(original_body, custom_prompt=prompt, target_language=target_lang, product_title=final_processed_title) # Pass final title
+                         translated_body = chatgpt_translate(original_body, custom_prompt=prompt, target_language=target_lang, product_title=final_processed_title, required_name=chosen_random_name_for_product) # Pass final title
                     elif chosen_method == "deepseek":
-                         translated_body = deepseek_translate(original_body, custom_prompt=prompt, target_language=target_lang, product_title=final_processed_title) # Pass final title
+                         translated_body = deepseek_translate(original_body, custom_prompt=prompt, target_language=target_lang, product_title=final_processed_title, required_name=chosen_random_name_for_product) # Pass final title
                     elif chosen_method == "google":
                          translated_body = google_translate(original_body, source_language=source_lang, target_language=target_lang)
                     elif chosen_method == "deepl":
@@ -1695,14 +1883,14 @@ def translate_collection_fields():
                          logger.info(f"  [{product_id}] Raw translated body length: {len(translated_body)}")
                          # *** Pass name_for_this_product and final_processed_title ***
                          final_body = post_process_description(
-                             original_html=original_body,
-                             new_html=translated_body,
-                             method=chosen_method,
-                             product_data=product_data, # Pass full data for current product
-                             target_lang=target_lang,
-                             final_product_title=final_processed_title, # Pass definitive title
-                             product_name=name_for_this_product       # Pass definitive name
-                         )
+                            original_html=original_body,
+                            new_html=translated_body,
+                            method=chosen_method,
+                            product_data=product_data,
+                            target_lang=target_lang,
+                            final_product_title=final_processed_title,
+                            product_name=chosen_random_name_for_product # <<< ADDED THIS LINE
+                        )
                          final_body = final_body.strip()
                          logger.info(f"  [{product_id}] Final body length: {len(final_body)}")
                          if final_body and final_body != original_body:
@@ -1719,9 +1907,7 @@ def translate_collection_fields():
                     logger.exception(f"❌ Error during body_html translation for product {product_id}:")
                     product_update_failed_fields.append("body_html")
 
-            # --- HANDLE Processing (using final_processed_title) ---
-            # REMOVED check for "handle" in fields_to_translate
-            # Now only checks if previous critical steps failed
+            # --- HANDLE Processing (using final_processed_title) --
             if "handle" not in product_update_failed_fields:
                 logger.info(f"  [{product_id}] Entering HANDLE processing (Auto-update enabled).") # Log change
                 if final_processed_title: # Still need a title to generate from
@@ -1740,10 +1926,6 @@ def translate_collection_fields():
                          product_update_failed_fields.append("handle") # Log failure for this specific field
                 else:
                      logger.warning(f"  [{product_id}] Skipping handle generation because final_processed_title is empty or missing.")
-            # No 'else' block needed here anymore for the fields_to_translate check
-
-            # --- VARIANT OPTIONS Processing ---
-            # ...(rest of your loop code)...
 
             # --- VARIANT OPTIONS Processing ---
             if "variant_options" in fields_to_translate and "variant_options" not in product_update_failed_fields:
@@ -1756,27 +1938,43 @@ def translate_collection_fields():
                     if options_to_translate:
                         logger.info(f"  [{product_id}] Found {len(options_to_translate)} option sets.")
                         # Ensure update_product_option_values handles errors internally or returns success/fail
-                        success = update_product_option_values(
-                            product_gid=product_gid,
-                            options_data=options_to_translate,
-                            target_language=target_lang,
-                            source_language=source_lang,
-                            translation_method=chosen_method
-                        )
-                        if not success:
-                            logger.error(f"❌ variants_utils failed to update options for product {product_id}.")
-                            product_update_failed_fields.append("variant_options") # Mark field as failed
-                    else:
-                         logger.info(f"  [{product_id}] No options found or fetch failed.")
+                        options_list = get_product_option_values(product_gid)
+                        if options_list:
+                            for current_option in options_list:
+                                success = update_product_option_values(
+                                    product_gid=product_gid,
+                                    option=current_option,    # <<< CHANGED: Use the correct parameter name (VERIFY THIS NAME in variants_utils.py)
+                                    target_language=target_lang,
+                                    source_language=source_lang,
+                                    translation_method=chosen_method
+                                )
+                                if not success:
+                                    logger.error(f"❌ variants_utils failed to update options for product {product_id}.")
+                                    product_update_failed_fields.append("variant_options") # Mark field as failed
+                        else:
+                            logger.info(f"  [{product_id}] No options found or fetch failed.")
                 except Exception as e:
                      logger.exception(f"❌ Error during variant option processing for product {product_id}:")
                      product_update_failed_fields.append("variant_options")
 
+            logger.info(f"  [{product_id}] Determining product type via AI...")
+            # Use the potentially translated/processed description and title for better context
+            description_for_type = updates.get("body_html", original_body)
+            title_for_context = final_processed_title if final_processed_title else original_title
+
+            determined_type = None # Initialize for this product iteration
+            try:
+                 determined_type = get_ai_type_from_description(
+                    product_description=description_for_type,
+                    allowed_types_list=ALLOWED_PRODUCT_TYPES, # Pass the imported set/list
+                    product_title=title_for_context
+                 )
+                 # determined_type will be None if AI fails or returns invalid type
+            except Exception as ai_type_err:
+                 logger.error(f"  [{product_id}] Exception calling get_ai_type_from_description: {ai_type_err}", exc_info=True)          
+
 
             # --- Update Product via REST API (Title, Body, Handle) ---
-            # Decide which field failures should prevent the entire update
-            # Example: If title OR body failed, maybe don't update anything via REST?
-            # Or maybe allow partial updates? Current logic allows partial if critical_failures isn't met.
             critical_fields = ["title", "body_html"] # Example: Define critical fields
             critical_failures = any(field in product_update_failed_fields for field in critical_fields)
 
@@ -1784,17 +1982,44 @@ def translate_collection_fields():
                 payload = {"product": {"id": product_id, **updates}}
                 logger.info(f"  [{product_id}] Preparing Shopify REST update for fields: {list(updates.keys())}")
 
-                update_url = f"https://{SHOPIFY_STORE_URL}/admin/api/2023-04/products/{product_id}.json"
+                update_url = f"{ensure_https(SHOPIFY_STORE_URL)}/admin/api/2023-04/products/{product_id}.json"
                 update_resp = shopify_request("PUT", update_url, json=payload)
 
                 if update_resp.status_code in (200, 201):
                     logger.info(f"✅ Successfully updated product {product_id} via REST.")
                     successful_updates += 1
-                else:
+                    if determined_type:
+                        logger.info(f"  [{product_id}] Proceeding with post-update actions using AI type '{determined_type}'...")
+
+                        # --- Assign Product Type ---
+                        logger.info(f"  [{product_id}] Attempting to assign type '{determined_type}'...")
+                        type_assigned = assign_product_type(product_id, determined_type) # Use the AI type
+                        if not type_assigned:
+                             logger.error(f"  [{product_id}] ❌ Failed to assign AI type '{determined_type}' after successful update.")
+                             # Decide if this failure should increment the main error_count
+
+                        # --- Move Product to Collection (Conditional) ---
+                        if type_assigned:
+                            logger.info(f"  [{product_id}] Type assigned. Attempting to move to collection '{TARGET_COLLECTION_NAME}'...")
+                            moved = move_product_to_pinterest_collection(product_id)
+                            if not moved:
+                                logger.error(f"  [{product_id}] ❌ Failed to move product to '{TARGET_COLLECTION_NAME}' after type assignment.")
+                                # Decide if this failure should increment the main error_count
+                        else:
+                            logger.warning(f"  [{product_id}] Skipping move because type assignment failed.")
+                    else:
+                        # This case occurs if AI failed to determine a valid type earlier
+                        logger.warning(f"  [{product_id}] Skipping type assignment and move because AI did not determine a valid type.")
+                    # <<<=========================================================>>>
+                    # <<<=== END OF ADDED BLOCK                                ===>>>
+                    # <<<=========================================================>>>
+
+                else: # Update failed
                     logger.error(f"❌ Error updating product {product_id} via REST: {update_resp.status_code} {update_resp.text}")
-                    error_count += 1 # Count update errors
+                    error_count += 1 # Count update error
             elif not updates:
-                 logger.info(f"  [{product_id}] No REST updates generated. Skipping Shopify update.")
+                 logger.info(
+                    f"  [{product_id}] No REST updates generated. Skipping Shopify update.")
             elif critical_failures:
                  logger.error(f"  [{product_id}] Skipping Shopify REST update due to critical processing errors in fields: {product_update_failed_fields}")
                  # Count as an error if critical fields failed, even if no update sent
@@ -1803,8 +2028,6 @@ def translate_collection_fields():
                 # Decide if you want to proceed with partial update - current logic does
                 payload = {"product": {"id": product_id, **updates}}
                 logger.warning(f"  [{product_id}] Proceeding with partial Shopify REST update for fields: {list(updates.keys())} despite non-critical errors in: {product_update_failed_fields}")
-                # ... (send update request, log success/failure, update counters) ...
-
 
             # --- Update Progress ---
             processed_count += 1
@@ -1852,7 +2075,7 @@ def approve_translations():
                 translated_title, translated_description = product
 
                 # Fetch original product for full image data (needed for image injection)
-                url_get = f"https://{SHOPIFY_STORE_URL}/admin/api/2023-04/products/{pid}.json"
+                url_get = f"{ensure_https(SHOPIFY_STORE_URL)}/admin/api/2023-04/products/{pid}.json"
                 resp = shopify_request("GET", url_get)
                 if resp.status_code != 200:
                     continue
@@ -1878,7 +2101,7 @@ def approve_translations():
                     }
                 }
 
-                url_put = f"https://{SHOPIFY_STORE_URL}/admin/api/2023-04/products/{pid}.json"
+                url_put = f"{ensure_https(SHOPIFY_STORE_URL)}/admin/api/2023-04/products/{pid}.json"
                 update_resp = shopify_request("PUT", url_put, json=payload)
 
                 if update_resp.status_code in (200, 201):

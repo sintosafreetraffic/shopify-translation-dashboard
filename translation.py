@@ -54,15 +54,6 @@ else:
 # Log DeepL key presence
 logger.info(f"DEEPL_API_KEY present? {'Yes' if DEEPL_API_KEY else 'No'}")
 
-# REMOVE the old/conflicting lines below if they still exist:
-# client = OpenAI(api_key=os.getenv("CHATGPT_API_KEY")) # REMOVE
-# client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com") # REMOVE
-# client = openai.OpenAI(api_key=OPENAI_API_KEY) # REMOVE
-
-# ---------------------------------- #
-# DETECT LANGUAGE FROM DESCRIPTION
-# ---------------------------------- #
-# ... (rest of your translation.py code) ...
 # ---------------------------------- #
 # DETECT LANGUAGE FROM DESCRIPTION
 # ---------------------------------- #
@@ -82,7 +73,6 @@ def clean_title(title: str) -> str:
     Remove wrapping quotes or brackets from title.
     """
     return re.sub(r'^[\'"“”‘’\[\]\(\){}<>]+|[\'"“”‘’\[\]\(\){}<>]+$', '', title.strip())
-
 
 def detect_language_from_description(description: str) -> str:
     """
@@ -270,7 +260,7 @@ def deepl_translate(
 # ---------------------------------- #
 # CHATGPT TITLE TRANSLATION
 # ---------------------------------- #
-def chatgpt_translate_title(product_title: str, custom_prompt: str = "", target_language: str = "German") -> str:
+def chatgpt_translate_title(product_title: str, custom_prompt: str = "", target_language: str = "German", required_name: str = None) -> str:
     """
     Translate product title with ChatGPT, enforcing constraints like '[Brand] | [Product Name]'.
     Keeps final text ≤ 30 tokens, ≤ 285 chars, and max 6 words in the '[Product Name]' portion.
@@ -282,6 +272,7 @@ def chatgpt_translate_title(product_title: str, custom_prompt: str = "", target_
         f"You are an expert e-commerce copywriter and translator. "
         f"Translate and rewrite product titles to make them persuasive, SEO-friendly, and fully adapted to the target language. "
         f"Ensure the translation follows the exact format '[Brand or Key Name] | [Product Name]'.\n\n"
+        f"**CRITICAL**: The '[Brand or Key Name]' part MUST be exactly '{required_name}'. Do not change it.\n" if required_name else ""
         "- DO NOT add quotation marks, brackets, or any extra formatting characters.\n"
         "- The title must be completely translated into {target_language} — NO mixing of languages.\n"
         "- Keep the exact format: '[Brand or Key Name] | [Product Name]'.\n"
@@ -348,13 +339,13 @@ def chatgpt_translate_title(product_title: str, custom_prompt: str = "", target_
         return product_title  # fallback
   
 def chatgpt_translate(
-    text: str, 
-    custom_prompt: str = "", 
+    text: str,
+    custom_prompt: str = "",
     target_language: str = "German",
-    field_type: str = "description", 
-    product_title: str = ""
+    field_type: str = "description",
+    product_title: str = "",
+    required_name: str = None # <<< ADD THIS
 ) -> str:
-
     """
     Translate or rewrite product text using ChatGPT with a structured output format.
 
@@ -444,7 +435,7 @@ def post_process_title(ai_output: str) -> str:
 
 # Inside the deepseek_translate_title function in translation.py
 
-def deepseek_translate_title(product_title: str, custom_prompt: str = "", target_language: str = "German") -> str:
+def deepseek_translate_title(product_title: str, custom_prompt: str = "", target_language: str = "German", required_name: str = None) -> str:
     """Translate product title using DeepSeek API with formatting constraints."""
     # --- ADD Check for client ---
     if not deepseek_client:
@@ -458,6 +449,7 @@ def deepseek_translate_title(product_title: str, custom_prompt: str = "", target
     system_instructions = (
         f"Translate the following product title into {target_language}. "
         f"Return ONLY the translated title in the exact format '[Human Name] | [Product Name]'. "
+        f"**CRITICAL**: The '[Human Name]' part MUST be exactly '{required_name}'. Do not change it.\n" if required_name else ""
         f"ABSOLUTELY DO NOT add any introductory text, notes, markdown, quotes, or explanations. "
         f"Just output the final title string and nothing else."
     )
@@ -502,7 +494,8 @@ def deepseek_translate(
     custom_prompt: str = "",
     target_language: str = "German",
     style=None,
-    product_title: str = "" # Added product_title argument
+    product_title: str = "", # Added product_title argument
+    required_name: str = None # <<< ADD THIS
 ) -> str:
     """
     Translate product descriptions using the DeepSeek API, aiming for structured output.
@@ -529,18 +522,26 @@ def deepseek_translate(
 
     # 3. Define System Instructions (asking for structured output)
     system_instructions = (
-        "You are an expert e-commerce copywriter. Rewrite the product description "
-        f"into fluent, persuasive {target_language} in a structured format exactly as follows:\n\n"
-        "Product Title: [Create an enticing, SEO-friendly title in the target language based on the original title/description]\n"
-        "Short Introduction: [Write 3–5 engaging sentences in the target language introducing the product]\n\n"
-        "Product Advantages:\n"
-        "- [Feature Name in target language]: [Benefit-driven detail in the target language explaining why the customer needs it.]\n"
-        "- [Feature Name in target language]: [Use power words like ‘luxurious’ or ‘perfect fit’ in the target language to create desire.]\n"
-        "- [Feature Name in target language]: [Link each feature to a real-life benefit in the target language. E.g. ‘Breathable fabric...’]\n"
-        "- (Add more relevant bullet points as needed based on the original description)\n\n"
-        "Call to Action: [Write a short, persuasive closing sentence in the target language]\n\n"
-        "**IMPORTANT**: Respond *only* with the structured text in {target_language}. Strictly follow this structure with the exact English labels (Product Title:, Short Introduction:, Product Advantages:, Call to Action:). Do not add any extra explanations before or after."
-    )
+            "You are an expert e-commerce copywriter. Clearly rewrite the provided product description "
+            f"into fluent, persuasive {target_language} in a structured format exactly as follows:\n\n"
+            # (+) Joins string above to result of expression below
+          + (f"**CRITICAL NAME USAGE**: Throughout the 'Short Introduction' and 'Call to Action' sections below, you MUST refer to the product using ONLY the name: '{required_name}'. DO NOT use any other names (like names found in the original text). Use the name '{required_name}' naturally where appropriate.\n\n" if required_name else "") # ADDED Specific Name Constraint
+            # (+) NEEDED HERE: Joins result of expression above to string literal below
+          + "Product Title: [Create an enticing, SEO-friendly title in the target language based on the original title/description]\n"
+            # (+) Joins string above to result of expression below
+          + (f"Short Introduction: (Write 3–5 engaging sentences in {target_language} introducing the '{required_name}' product. Make sure to use the name '{required_name}'.)\n\n" if required_name else f"Short Introduction: (Write 3–5 engaging sentences in {target_language} introducing the product.)\n\n") # MODIFIED Intro Guideline
+            # (+) NEEDED HERE: Joins result of expression above to string literal below
+          + "Product Advantages:\n"
+            "- [Feature Name in target language]: [Benefit-driven detail...]\n" # Auto-joins with literal above
+            "- [Feature Name in target language]: [Use power words...]\n"       # Auto-joins
+            "- [Feature Name in target language]: [Link each feature...]\n"      # Auto-joins
+            "- (Add more relevant bullet points...)\n\n"                        # Auto-joins
+            "💡 **Important**: bullet points must SELL, not just describe. Do NOT omit the product description.\n" # Auto-joins
+             # (+) Joins string above to result of expression below
+          + (f"Call to Action: (Write a short, persuasive closing sentence in {target_language}. Mention the name '{required_name}' if it fits naturally.)\n\n" if required_name else "Call to Action: [Write a short, persuasive closing sentence...]\n\n") # MODIFIED CTA Guideline
+            # (+) NEEDED HERE: Joins result of expression above to string literal below
+          + f"**IMPORTANT**: Respond *only* with the structured text in {target_language}. Strictly follow this structure with the exact English labels (Product Title:, Short Introduction:, Product Advantages:, Call to Action:). Do not add any extra explanations before or after."
+        )
 
     # 4. Define User Content (providing original text and context)
     user_content = f"""
