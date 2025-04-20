@@ -41,7 +41,8 @@ try:
         ALLOWED_PRODUCT_TYPES,        # Needed by get_ai_type_from_description
         TARGET_COLLECTION_NAME,
         SOURCE_COLLECTION_ID,   # <<<--- ADD THIS IMPORT (To access the configured ID)
-        SOURCE_COLLECTION_NAME # <<<--- ADD THIS IMPORT (For logging)        # Needed by move_product_to_pinterest_collection
+        SOURCE_COLLECTION_NAME,
+        platform_api_remove_product_from_collection # <<<--- ADD THIS IMPORT (For logging)        # Needed by move_product_to_pinterest_collection
     )
     logger.info("Successfully imported actions and AI type function from product_actions.py")
 except ImportError as e:
@@ -348,29 +349,46 @@ def post_process_description(original_html, new_html, method, product_data=None,
 
             # --- Bullet Point Section ---
             # --- Add this NEW structure for the list ---
+          #  if bullet_html:
+              #  final_html_parts += [
+                    # Keep your H4 heading for "Product Advantages"
+               #     f'<h4 class="advantages-heading" style="font-weight:bold; margin-top: 1.5em; margin-bottom: 0.5em;">{labels.get("advantages", "Product Advantages")}</h4>',
+
+                    # ---> ADDED WRAPPER DIV <---
+                    # This div centers the list block itself because it's inline-block
+                    # within a text-align:center parent. text-align:left keeps list text readable.
+                 #   '<div class="centered-list-wrapper" style="display: inline-block; text-align: left;">',
+
+                        # The UL inside the wrapper. Keep necessary list styles.
+                        # Padding creates space for bullets; margin:0 removes default space.
+              #          '<ul class="advantages-list" style="list-style-position: outside; padding-left: 1.5em; margin: 0;">',
+                #            bullet_html, # Your generated <li> items
+                  #      '</ul>',
+#
+              #      # ---> END ADDED WRAPPER <---
+            #    ]
+            # --- End New Structure ---
+          #  else:
+             #   logger.info(f"[{current_product_id}] DEBUG: Skipping bullet point section (bullet_html is empty).")
+
+
+                # --- Bullet Point Section ---
             if bullet_html:
                 final_html_parts += [
                     # Keep your H4 heading for "Product Advantages"
                     f'<h4 class="advantages-heading" style="font-weight:bold; margin-top: 1.5em; margin-bottom: 0.5em;">{labels.get("advantages", "Product Advantages")}</h4>',
 
-                    # ---> ADDED WRAPPER DIV <---
-                    # This div centers the list block itself because it's inline-block
-                    # within a text-align:center parent. text-align:left keeps list text readable.
-                    '<div class="centered-list-wrapper" style="display: inline-block; text-align: left;">',
-
-                        # The UL inside the wrapper. Keep necessary list styles.
-                        # Padding creates space for bullets; margin:0 removes default space.
-                        '<ul class="advantages-list" style="list-style-position: outside; padding-left: 1.5em; margin: 0;">',
-                            bullet_html, # Your generated <li> items
-                        '</ul>',
-
-                    '</div>', # ---> CLOSE WRAPPER DIV <---
-                    # ---> END ADDED WRAPPER <---
+                    # ---> REPLACED WITH SIMPLER UL STRUCTURE <---
+                    # Add the desired class, relying on external CSS for ALL styling (centering, list appearance)
+                    '<ul class="product-bulletpoints">',
+                        bullet_html, # Your generated <li> items
+                    '</ul>',
+                    # ---> END REPLACEMENT <---
                 ]
-            # --- End New Structure ---
             else:
                 logger.info(f"[{current_product_id}] DEBUG: Skipping bullet point section (bullet_html is empty).")
             # --- End Bullet Point Section ---
+                # --- End Bullet Point Section ---
             
             if image2_url:
                 final_html_parts.append(
@@ -1681,11 +1699,25 @@ def translate_collection_fields():
         # --- Fetch products ---
         # Fetch required fields, including handle if needed for comparison or update
         fetch_fields = "id,title,body_html,handle,images,variants,options"
+        # --- Modify this section ---
+        try:
+            # Extract numeric ID from GID (e.g., "gid://shopify/Collection/644626448708")
+            numeric_collection_id = collection_id.split('/')[-1]
+            if not numeric_collection_id.isdigit():
+                raise ValueError("Could not extract numeric ID from collection GID")
+            logger.info(f"Using numeric Collection ID for REST API call: {numeric_collection_id}") # Add log
+        except Exception as e:
+            logger.error(f"Failed to process collection_id '{collection_id}': {e}")
+            return jsonify({"error": f"Invalid collection_id format: {collection_id}"}), 400
+
         url = (
             f"{ensure_https(SHOPIFY_STORE_URL)}/admin/api/2023-04/products.json"
-            f"?collection_id={collection_id}&fields={fetch_fields}"
-            # Add limit if needed: &limit=250
+            f"?collection_id={numeric_collection_id}&fields={fetch_fields}" # <<< USE NUMERIC ID HERE
         )
+        # --- End modification ---
+
+        resp = shopify_request("GET", url)
+        # ... rest of the function
         resp = shopify_request("GET", url)
         if resp.status_code != 200:
             logger.error(f"Failed to load products from Shopify. Status: {resp.status_code}, Response: {resp.text}")
@@ -1982,13 +2014,16 @@ def translate_collection_fields():
                 payload = {"product": {"id": product_id, **updates}}
                 logger.info(f"  [{product_id}] Preparing Shopify REST update for fields: {list(updates.keys())}")
 
-                update_url = f"{ensure_https(SHOPIFY_STORE_URL)}/admin/api/2023-04/products/{product_id}.json"
+                update_url = f"{ensure_https(SHOPIFY_STORE_URL)}/admin/api/2023-04/products/{product_id}.json" # Consider using API_VERSION variable if defined
                 update_resp = shopify_request("PUT", update_url, json=payload)
 
+                # Check if the main product update (title, body etc.) was successful
                 if update_resp.status_code in (200, 201):
                     logger.info(f"✅ Successfully updated product {product_id} via REST.")
                     successful_updates += 1
-                    if determined_type:
+
+                    # --- Post-Update Actions (Type Assignment, Move, Remove) ---
+                    if determined_type: # Check if AI determined a type
                         logger.info(f"  [{product_id}] Proceeding with post-update actions using AI type '{determined_type}'...")
 
                         # --- Assign Product Type ---
@@ -1996,49 +2031,76 @@ def translate_collection_fields():
                         type_assigned = assign_product_type(product_id, determined_type) # Use the AI type
                         if not type_assigned:
                              logger.error(f"  [{product_id}] ❌ Failed to assign AI type '{determined_type}' after successful update.")
-                             # Decide if this failure should increment the main error_count
 
-                        # --- Move Product to Collection (Conditional) ---
-                        if type_assigned:
+                        # --- Move Product to Target Collection (Conditional on Type Assignment) ---
+                        if type_assigned: # Only proceed if type assignment was successful
                             logger.info(f"  [{product_id}] Type assigned. Attempting to move to collection '{TARGET_COLLECTION_NAME}'...")
-                            moved = move_product_to_pinterest_collection(product_id)
-                            if not moved:
+                            # RENAME 'moved' to 'moved_to_target' for clarity
+                            moved_to_target = move_product_to_pinterest_collection(product_id)
+
+                            if moved_to_target: # Check if move to target collection succeeded
+                                logger.info(f"  [{product_id}] ✅ Successfully moved product to '{TARGET_COLLECTION_NAME}'.")
+
+                                # <<< === ADD THIS REMOVAL BLOCK === >>>
+                                # 3. Remove from Source Collection
+                                removed_from_source = False
+                                # Get the configured source ID (ensure it's loaded/available)
+                                current_source_id = None
+                                try:
+                                    # Assumes SOURCE_COLLECTION_ID is imported or loaded via os.getenv
+                                    # If loaded via os.getenv ensure it's done before this loop starts
+                                    source_id_env = os.getenv("SOURCE_COLLECTION_ID") # Re-check env or use imported constant
+                                    if source_id_env:
+                                        current_source_id = int(source_id_env)
+                                except (ValueError, TypeError):
+                                    logger.error(f"[{product_id}] Invalid SOURCE_COLLECTION_ID configured.")
+
+                                if current_source_id: # Check if source ID is valid
+                                    logger.info(f"  [{product_id}] Attempting removal from source collection '{SOURCE_COLLECTION_NAME}' (ID: {current_source_id})...")
+                                    # Call the imported removal function
+                                    # Make sure platform_api_remove_product_from_collection is imported
+                                    removed_from_source = platform_api_remove_product_from_collection(product_id, current_source_id)
+                                    if not removed_from_source:
+                                         logger.error(f"  [{product_id}] ❌ Failed removal from source collection {current_source_id}.")
+                                    else:
+                                         logger.info(f"  [{product_id}] ✅ Removal from source collection {current_source_id} status: {removed_from_source}")
+                                else:
+                                    logger.warning(f"  [{product_id}] Skipping removal from source: SOURCE_COLLECTION_ID not configured or invalid.")
+                                # <<< === END OF ADDED REMOVAL BLOCK === >>>
+
+                            else: # Move to target failed
                                 logger.error(f"  [{product_id}] ❌ Failed to move product to '{TARGET_COLLECTION_NAME}' after type assignment.")
                                 # Decide if this failure should increment the main error_count
-                        else:
-                            logger.warning(f"  [{product_id}] Skipping move because type assignment failed.")
-                    else:
+                        else: # Type assignment failed
+                            logger.warning(f"  [{product_id}] Skipping move and removal because type assignment failed.")
+                    else: # AI type determination failed
                         # This case occurs if AI failed to determine a valid type earlier
-                        logger.warning(f"  [{product_id}] Skipping type assignment and move because AI did not determine a valid type.")
-                    # <<<=========================================================>>>
-                    # <<<=== END OF ADDED BLOCK                                ===>>>
-                    # <<<=========================================================>>>
+                        logger.warning(f"  [{product_id}] Skipping type assignment, move, and removal because AI did not determine a valid type.")
+                    # No more code should be inside the 'if determined_type:' block after this point
 
-                else: # Update failed
+                else: # Main product update failed
                     logger.error(f"❌ Error updating product {product_id} via REST: {update_resp.status_code} {update_resp.text}")
                     error_count += 1 # Count update error
-            elif not updates:
-                 logger.info(
-                    f"  [{product_id}] No REST updates generated. Skipping Shopify update.")
-            elif critical_failures:
-                 logger.error(f"  [{product_id}] Skipping Shopify REST update due to critical processing errors in fields: {product_update_failed_fields}")
-                 # Count as an error if critical fields failed, even if no update sent
+
+            elif not updates: # No updates were generated for REST API
+                 logger.info(f"  [{product_id}] No REST updates generated. Skipping Shopify update and subsequent actions.")
+            elif critical_failures: # Critical field processing failed
+                 logger.error(f"  [{product_id}] Skipping Shopify REST update and subsequent actions due to critical processing errors in fields: {product_update_failed_fields}")
                  error_count += 1
-            else: # Updates exist but non-critical failures occurred (e.g. only handle failed)
-                # Decide if you want to proceed with partial update - current logic does
-                payload = {"product": {"id": product_id, **updates}}
-                logger.warning(f"  [{product_id}] Proceeding with partial Shopify REST update for fields: {list(updates.keys())} despite non-critical errors in: {product_update_failed_fields}")
+            # Note: The 'else' for non-critical failures was removed as the payload wasn't used there.
+            # If you want partial updates despite non-critical errors, that logic needs to be added back carefully.
 
             # --- Update Progress ---
+            # (This should be outside the 'if updates and not critical_failures:' block
+            # to ensure progress is updated even if an update wasn't attempted/failed)
             processed_count += 1
             translation_progress["completed"] = processed_count
-            translation_progress["errors"] = error_count # Errors now reflect processing/update failures
+            translation_progress["errors"] = error_count
 
         # --- Loop finished ---
         final_message = f"Translation process completed for collection. Products processed: {processed_count}/{len(products)}. Successful updates: {successful_updates}. Errors encountered: {error_count}."
         logger.info(final_message)
         return jsonify({"success": True, "message": final_message, "processed_count": processed_count, "error_count": error_count, "successful_updates": successful_updates})
-
     except Exception as e:
         logger.exception("❌ Unhandled error in translate_collection_fields:")
         translation_progress["total"] = 0; translation_progress["completed"] = 0; translation_progress["errors"] = 0 # Reset progress
