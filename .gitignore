@@ -1,5 +1,7 @@
-
+stores.json
 credentials.json
 .env
-credentials.json
-.env
+.DS_Store
+gunicorn.log
+__pycache__/
+*.pyc

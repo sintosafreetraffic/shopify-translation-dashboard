@@ -24,6 +24,111 @@ def extract_name_from_title(title: str) -> str | None:
         logger.debug("extract_name_from_title: Input title is empty or not a string.")
         return None
 
+def clean_title_output(title):
+    """ Cleans final titles: removes extra prefixes, placeholders, punctuation. """
+    if not title: return ""
+
+    # Remove prefixes added by some AI models (if post_process_title didn't catch them)
+    try:
+        prefixes = [r"Neuer Titel:", r"Product Title:", r"Title:", r"Titel:", r"Translated Title:"]
+        prefix_pattern = r"^\s*(?:" + "|".join(prefixes) + r")\s*"
+        title = re.sub(prefix_pattern, "", title, flags=re.IGNORECASE).strip()
+    except Exception as e: logger.error(f"Error removing prefixes in clean_title_output: {e}")
+
+    # Remove wrapping quotes/brackets
+    title = re.sub(r'^[\'"“”‘’\[\]\(\){}<>]+|[\'"“”‘’\[\]\(\){}<>]+$', '', title).strip()
+
+    # Remove specific placeholders (add more as needed)
+    try:
+        placeholders = ["[Produktname]", "[Brand]", "[Marke]"] # Add other languages if seen
+        for placeholder in placeholders:
+             placeholder_pattern = r"(?i)\s*\[?\s*" + re.escape(placeholder.strip('[] ')) + r"\s*\]?\s*"
+             title = re.sub(placeholder_pattern, "", title).strip()
+    except Exception as e: logger.error(f"Error removing placeholders in clean_title_output: {e}")
+
+    # Remove parentheses symbols
+    title = title.replace('(', '').replace(')', '')
+
+    # Remove common trailing punctuation/symbols & consolidate spaces
+    title = title.strip().rstrip(",.;:!?-*")
+    title = ' '.join(title.split())
+
+    # Handle incomplete endings (Optional, maybe remove if not needed)
+    # incomplete_endings = ("et", "à", "de", "avec", "pour", "en", "sur", "dans")
+    # if title and len(title.split()) > 1:
+    #    words = title.split(); last_word = words[-1]
+    #    if last_word.lower() in incomplete_endings and not title[-1] in ".!?…": title += "..."
+
+    return title.strip()
+
+
+def post_process_title(ai_output: str) -> str:
+    """ Extracts and cleans title, robust to different AI outputs. """
+    if not ai_output: return ""
+    logger.info(f"🔍 post_process_title Raw: '''{ai_output}'''")
+
+    try: text = BeautifulSoup(ai_output, "html.parser").get_text(separator=' ')
+    except Exception: text = ai_output
+    text = re.sub(r"\*\*", "", text); text = ' '.join(text.split()).strip()
+    logger.info(f"🧼 post_process_title Cleaned: '''{text}'''")
+
+    # ---> Initialize title variable <---
+    title = ""
+
+    # Strategy 1: Extract 'Name | Anything', clean trail
+    pattern_extract_broad = r"([A-ZÄÖÜ][a-zäöüß]*(?:\s+[A-ZÄÖÜ][a-zäöüß]+)*)\s*\|\s*(.*)"
+    match = re.search(pattern_extract_broad, text)
+    if match:
+        name_part = match.group(1).strip(); product_part_raw = match.group(2).strip()
+        # --- Add your trailing junk patterns here ---
+        trailing_junk_patterns = [ r"\s*\.?\s*Anpassungen.*$", r"\s*\.?\s*Überarbeitet.*$", r"\s*\.?\s*SEO-Opt.*$", r"\s*\*\*.*$", r"\s*-\s*Struktur.*$", r"\s*-\s*Keyword.*$" ]
+        product_part_cleaned = product_part_raw
+        for junk_pattern in trailing_junk_patterns: product_part_cleaned = re.sub(junk_pattern, "", product_part_cleaned, flags=re.IGNORECASE).strip()
+        product_part_cleaned = product_part_cleaned.strip('"').strip().rstrip('.').strip()
+        # --- End junk patterns ---
+        if len(name_part)>1 and len(product_part_cleaned) > 3 and len(product_part_cleaned) < 150:
+            title = f"{name_part} | {product_part_cleaned}" # Assign valid result
+            logger.info(f"✅ post_process_title: Extracted Broadly -> '{title}'")
+            return title # Return early on good match
+
+    # Strategy 2: Extract between labels (only if title empty)
+    if not title:
+        pattern_between = r"(?i)(?:Produkttitel:|Product Title:)\s*(.*?)\s*(?:Kurze Einführung:|Short Introduction:|$)"
+        match = re.search(pattern_between, text)
+        if match:
+             candidate = match.group(1).strip().rstrip(':,')
+             logger.info(f"🧩 post_process_title: Matched between labels -> '{candidate}'")
+             if len(candidate) > 5 and '|' in candidate: title = candidate # Assign if valid
+             else: logger.warning(f"⚠️ Match between labels ignored (format issue): '{candidate}'")
+        if title: return title # Return if found
+
+    # Strategy 3: Extract after label (only if title empty)
+    if not title:
+        pattern_after = r"(?i)(?:Produkttitel:|Product Title:)\s*(.*)"
+        match = re.search(pattern_after, text)
+        if match:
+            candidate = match.group(1).strip().rstrip(':,')
+            # Check candidate doesn't contain next label BEFORE assigning
+            if not re.search(r"(?i)(Kurze Einführung:|Short Introduction:)", candidate):
+                logger.info(f"🧩 post_process_title: Matched after label -> '{candidate}'")
+                if len(candidate) > 5 and '|' in candidate: title = candidate # Assign if valid
+                else: logger.warning(f"⚠️ Match after label ignored (format issue): '{candidate}'")
+            else: logger.warning(f"⚠️ Match after label contained intro label: '{candidate}'")
+        if title: return title # Return if found
+
+    # Strategy 4: Final Fallback (only if title still empty)
+    if not title:
+        common_non_title = r"(?i)(Kurze Einführung|Short Introduction|Vorteile|Advantages)"
+        if '|' in text and len(text) < 150 and len(text) > 5 and not re.search(common_non_title, text):
+            logger.warning(f"⚠️ post_process_title: No pattern/label matched, using plausible cleaned text: '{text}'")
+            title = text # Assign cleaned text
+        else:
+            logger.error(f"❌ post_process_title: All methods failed. Input: '{text[:100]}...'")
+            title = "" # Ensure empty string on total failure
+
+    return title # Return final determined title (could be empty)
+    
+
 # --- Parser with added DEBUG logging ---
 def _parse_chatgpt_description(ai_text):
     """ Robust parser v2: Finds labels sequentially. """

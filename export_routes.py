@@ -37,39 +37,92 @@ def ensure_https(url):
         return f"https://{url}"
     return url
 
+# ---> ADD THIS NEW HELPER FUNCTION <---
+def get_online_store_publication_id(shopify_store_url, shopify_api_key):
+    """
+    Fetches the GraphQL ID of the 'Online Store' publication (sales channel).
+    """
+    query = """
+    query {
+      publications(first: 50) {
+        edges {
+          node {
+            id
+            name
+          }
+        }
+      }
+    }
+    """
+    variables = {}
+    logger.info(f"Attempting to fetch publications for store: {shopify_store_url}")
+    try:
+        response = shopify_graphql_request(query, variables, shopify_store_url, shopify_api_key)
+        if response and "data" in response and "publications" in response["data"]:
+            publications = response["data"]["publications"]["edges"]
+            for edge in publications:
+                node = edge.get("node", {})
+                # Common names for the online store channel
+                if node.get("name") in ["Online Store", "Onlinestore", "Boutique en ligne"]:
+                    pub_id = node.get("id")
+                    logger.info(f"✅ Found 'Online Store' publication ID: {pub_id}")
+                    return pub_id
+            logger.warning("⚠️ 'Online Store' publication channel not found in the first 50 publications.")
+            return None
+        else:
+            logger.error(f"❌ Failed to fetch publications or unexpected response structure: {response}")
+            return None
+    except Exception as e:
+        logger.exception(f"❌ Error fetching publication ID: {e}")
+        return None
+# ---> END NEW HELPER FUNCTION <---
+
 # ---> ADD THIS FUNCTION DEFINITION <---
-def get_store_credentials(store_value: str) -> tuple[str | None, str | None]:
+# In export_routes.py
+
+# --- MODIFY this function ---
+def get_store_credentials(store_value: str) -> dict | None: # <-- Return type changed to dict | None
     """
-    Finds the URL and API key for a given store identifier ('value')
-    from the SHOPIFY_STORES_CONFIG environment variable.
+    Finds the configuration dictionary (including URL, API key, and Pinterest GID)
+    for a given store identifier ('value') from the SHOPIFY_STORES_CONFIG
+    environment variable.
     """
-    if not SHOPIFY_STORES_CONFIG: # Check if env var is loaded
+    if not SHOPIFY_STORES_CONFIG:
         logger.error("❌ Environment variable SHOPIFY_STORES_CONFIG is not set.")
-        return None, None
+        return None
     try:
         stores_config = json.loads(SHOPIFY_STORES_CONFIG)
         if not isinstance(stores_config, list):
              logger.error("❌ SHOPIFY_STORES_CONFIG is not a valid JSON list.")
-             return None, None
+             return None
 
         for store_info in stores_config:
+            # Ensure it's a dict and the value matches
             if isinstance(store_info, dict) and store_info.get("value") == store_value:
-                url = ensure_https(store_info.get("shopify_store_url")) # Use ensure_https
+                # Basic validation of required fields
+                url = store_info.get("shopify_store_url")
                 key = store_info.get("shopify_api_key")
+                # Pinterest GID is optional in the config, handle missing gracefully
+                pinterest_gid = store_info.get("pinterest_collection_gid") # Optional
+
                 if url and key:
-                    logger.info(f"Found credentials for target store value: '{store_value}'")
-                    return url, key
+                    # Ensure URL has https
+                    store_info["shopify_store_url"] = ensure_https(url)
+                    logger.info(f"Found config for target store value: '{store_value}' (Pinterest GID: {pinterest_gid or 'Not Set'})")
+                    return store_info # <-- Return the whole dictionary
                 else:
                     logger.error(f"❌ Missing URL or Key for store value '{store_value}' in config.")
-                    return None, None
+                    return None # Invalid entry
+
         logger.warning(f"⚠️ Target store value '{store_value}' not found in SHOPIFY_STORES_CONFIG.")
-        return None, None
+        return None # Store value not found
     except json.JSONDecodeError as json_err:
         logger.error(f"❌ Failed to parse JSON from SHOPIFY_STORES_CONFIG: {json_err}")
-        return None, None
+        return None
     except Exception as e:
         logger.exception(f"❌ Error getting credentials for store '{store_value}': {e}")
-        return None, None
+        return None
+# --- END MODIFICATION ---
 # ---> END ADDED FUNCTION <---
 
 def extract_name_from_title(title: str) -> str | None:
@@ -275,44 +328,72 @@ SHEET2_NAME = "Sheet2"
 
 logger = logging.getLogger(__name__) # Ensure logger is defined
 
-def update_cloned_product_info_in_sheet(product_id, cloned_gid, cloned_title, new_status):
+# In export_routes.py
+
+# --- Modify this function ---
+def update_cloned_product_info_in_sheet(product_id, cloned_gid, cloned_title, new_status, target_store): # <-- ADD target_store parameter
     """
     Updates Sheet1 for a given original product ID with the Status (Col D),
-    Cloned Product GID (Col E), and Cloned Product Title (Col F).
+    Cloned Product GID (Col E), Cloned Product Title (Col F), and Target Store (Col G).
     """
     if not product_id:
         logger.warning("⚠️ Cannot update sheet, original product_id missing.")
         return False
 
     log_title = cloned_title[:50] + '...' if cloned_title else '(empty)'
-    logger.info(f"Attempting sheet update for Original ID {product_id}: Status='{new_status}', GID='{cloned_gid}', Title='{log_title}'")
+    # Update log message
+    logger.info(f"Attempting sheet update for Original ID {product_id}: Status='{new_status}', GID='{cloned_gid}', Title='{log_title}', TargetStore='{target_store}'")
     try:
+        # Use helper to get client/sheet - assuming _get_worksheet exists and works
+        # You might need to adapt this if _get_worksheet isn't defined in this file
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
         creds = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_CREDENTIALS_FILE, scope)
         client = gspread.authorize(creds)
         sheet = client.open_by_key(GOOGLE_SHEET_ID).worksheet(SHEET1_NAME)
+        # Alternatively, if you have a _get_worksheet helper defined in this file:
+        # sheet = _get_worksheet(SHEET1_NAME)
+        if not sheet:
+             logger.error("Failed to get worksheet object in update_cloned_product_info_in_sheet.")
+             return False
+
 
         # Find row based on original Product ID (Column A = 1)
-        cell = sheet.find(str(product_id), in_column=1) # Use find for efficiency
+        # Assuming _retry_gspread_operation is available or handle errors directly
+        # cell = _retry_gspread_operation(sheet.find, str(product_id), in_column=1) # If using retry helper
+        cell = sheet.find(str(product_id), in_column=1) # Without retry helper for simplicity here
+
         if cell:
             row_index = cell.row
-            # Prepare batch update data for Status(D), GID(E), Title(F)
+            # Define column indices (1-based for range)
+            status_col = 4       # D
+            gid_col = 5          # E
+            title_col = 6        # F
+            target_store_col = 7 # G <-- New Column
+
+            # Prepare batch update data for Status(D), GID(E), Title(F), Target Store(G)
             update_data = [
-                {"range": f"D{row_index}", "values": [[str(new_status or '')]]},   # Column D
-                {"range": f"E{row_index}", "values": [[str(cloned_gid or '')]]},    # Column E
-                {"range": f"F{row_index}", "values": [[str(cloned_title or '')]]} # Column F
+                {"range": gspread.utils.rowcol_to_a1(row_index, status_col),       "values": [[str(new_status or '')]]},
+                {"range": gspread.utils.rowcol_to_a1(row_index, gid_col),          "values": [[str(cloned_gid or '')]]},
+                {"range": gspread.utils.rowcol_to_a1(row_index, title_col),        "values": [[str(cloned_title or '')]]},
+                {"range": gspread.utils.rowcol_to_a1(row_index, target_store_col), "values": [[str(target_store or '')]]} # <-- ADDED Target Store update
             ]
-            logger.debug(f"Found row {row_index} for ID {product_id}. Batch update: {update_data}")
-            # Consider adding retry logic here
-            sheet.batch_update(update_data, value_input_option="USER_ENTERED")
-            logger.info(f"✅ Updated Sheet1 Row {row_index} (Status, GID, Cloned Title) for original ID {product_id}.")
+            # Update log message
+            logger.debug(f"Found row {row_index} for ID {product_id}. Batch update: Status, GID, Title, Target Store")
+            # _retry_gspread_operation(sheet.batch_update, update_data, value_input_option="USER_ENTERED") # If using retry helper
+            sheet.batch_update(update_data, value_input_option="USER_ENTERED") # Without retry helper
+
+            # Update log message
+            logger.info(f"✅ Updated Sheet1 Row {row_index} (Status, GID, Cloned Title, Target Store) for original ID {product_id}.")
             return True
         else:
             logger.warning(f"⚠️ Could not find original product_id={product_id} in '{SHEET1_NAME}' to update info/status.")
             return False
     except Exception as e:
-        logger.exception(f"❌ Error in update_cloned_product_info_in_sheet for ID {product_id}: {e}")
+        # Update log message
+        logger.exception(f"❌ Error in update_cloned_product_info_in_sheet for ID {product_id} (Target: {target_store}): {e}")
         return False
+
+# --- END MODIFICATION ---
 
 def clean_title_output(title):
     """ Cleans final titles: removes extra prefixes, placeholders, punctuation. """
@@ -417,196 +498,333 @@ def post_process_title(ai_output: str) -> str:
 
     return title # Return final determined title (could be empty)
 
-def clone_products_to_target_store(product_sales, target_store_info):
+# In export_routes.py
+
+# --- Modify this function ---
+# In export_routes.py
+
+# In export_routes.py
+
+# --- Ensure required imports like gspread, ServiceAccountCredentials, Lock etc. are present ---
+# --- Ensure constants like GOOGLE_CREDENTIALS_FILE, GOOGLE_SHEET_ID, SHEET1_NAME are defined ---
+
+# --- CORRECTED & IMPROVED function ---
+def clone_products_to_target_store(
+    product_sales,
+    target_store_info,               # Dict with url, key, value
+    # online_store_publication_id=None, # Optional: Keep if needed elsewhere, but not used here
+    # pinterest_collection_gid=None,   # Optional: Keep if needed elsewhere, but not used here
+    pinterest_collection_rest_id=None # USE THIS for REST collection add
+    ):
     """
-    Clones products defined in product_sales (from Sheet1) to the target store.
-    Fetches full data from the SOURCE store. Uses CORRECT dictionary keys ('Product ID').
-    Updates Sheet1 with Cloned GID and Cloned Title upon success.
+    Clones products via REST, sets status=ACTIVE, published=True,
+    and adds to Pinterest collection via REST Collects endpoint.
+    Filters products based ONLY on Sheet1 status and GID presence.
+    Handles concurrency. Keeps GID handling for sheet updates/Phase 2.
 
     Args:
-        product_sales: List of dictionaries from Sheet1 (must contain 'Product ID').
-        target_store_info: Dictionary with 'value', 'shopify_store_url', 'shopify_api_key'.
-
-    Returns:
-        List of dictionaries containing info about successfully cloned products.
+        product_sales: List of dictionaries from input source ('Product ID').
+        target_store_info: Dictionary with store config (url, api_key, value).
+        pinterest_collection_rest_id: REST ID for the target collection.
     """
-    if not product_sales: # Handle empty input list
+    # --- Initial Setup ---
+    target_store_url = target_store_info.get("shopify_store_url")
+    target_api_key = target_store_info.get("shopify_api_key")
+    target_store_value = target_store_info.get("value", "UNKNOWN")
+
+    if not target_store_url or not target_api_key:
+         logger.error("❌ Missing shopify_store_url or shopify_api_key in target_store_info.")
+         return []
+    if not product_sales:
         logger.info("No products provided to clone_products_to_target_store.")
         return []
 
-    logger.info(f"Starting cloning process for {len(product_sales)} potential products to target store '{target_store_info['value']}'.")
+    logger.info(f"Starting REST-based cloning process for {len(product_sales)} potential products to target store '{target_store_value}'.")
     created_products = []
-    # processed_ids_current_run = set() # Not needed if using global set correctly
-    global currently_processing_ids # Access global set
+    global currently_processing_ids # Use global lock correctly
 
-    # === STEP 1: Deduplicate Input (Using CORRECT Key) ===
+    # === Step 1: Deduplication ===
     seen_ids = set()
     unique_sales = []
     duplicate_input_ids = []
     for p in product_sales:
+        # Ensure p is a dictionary and has 'Product ID'
+        if not isinstance(p, dict):
+             logger.warning(f"Skipping non-dictionary item in product_sales: {p}")
+             continue
         pid = str(p.get("Product ID", "")).strip() # Use 'Product ID'
         if not pid: logger.warning(f"Skipping item due to missing 'Product ID': {p}"); continue
         if pid in seen_ids: duplicate_input_ids.append(pid); continue
         seen_ids.add(pid)
         unique_sales.append(p)
-    logger.info(f"🧠 Initial deduplication: Received={len(product_sales)}, Unique={len(unique_sales)}, Duplicates skipped={len(duplicate_input_ids)}")
+    logger.info(f"🧠 Initial deduplication: Input={len(product_sales)}, Unique={len(unique_sales)}, Duplicates skipped={len(duplicate_input_ids)}")
     if duplicate_input_ids: logger.debug(f"🧹 Duplicate input IDs skipped: {duplicate_input_ids}")
+    if not unique_sales:
+        logger.info("No unique products left after deduplication.")
+        return []
 
 
-    # === STEP 2 & 3: Load Sheets and Filter (Using CORRECT Key) ===
-    allowed_ids_sheet1, blocked_ids = set(), set()
-    sheet1_cloned_gids = {}
+    # === STEP 2 & 3: Load Sheet1 and Filter (Sheet1 ONLY) ===
+    allowed_ids_sheet1 = set()
+    blocked_ids_sheet1 = set()
+    sheet1_cloned_gids = set() # Store as set now
     try:
-        # Assuming _get_worksheet helper exists in google_sheets.py or define client/sheet here
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
         creds = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_CREDENTIALS_FILE, scope)
         client = gspread.authorize(creds)
         sheet = client.open_by_key(GOOGLE_SHEET_ID)
-        sheet1_records = sheet.worksheet(SHEET1_NAME).get_all_records()
-        sheet2_records = sheet.worksheet(SHEET2_NAME).get_all_records()
+        sheet1 = sheet.worksheet(SHEET1_NAME)
+        sheet1_records = sheet1.get_all_records()
+        logger.info(f"Read {len(sheet1_records)} records from {SHEET1_NAME}.")
 
         for row in sheet1_records:
-             pid = str(row.get("Product ID", "")).strip() # Use 'Product ID'
+             pid = str(row.get("Product ID", "")).strip()
              if not pid: continue
              status = row.get("Status", "").strip().upper()
              cloned_gid = row.get("Cloned Product GID", "").strip()
-             if status in ["DONE", "APPROVED"]: blocked_ids.add(pid)
-             else: allowed_ids_sheet1.add(pid)
-             if cloned_gid: sheet1_cloned_gids[pid] = cloned_gid
 
-        blocked_ids.update(str(row.get("Product ID", "")).strip() for row in sheet2_records if row.get("Product ID")) # Use 'Product ID'
-        logger.info(f"📋 Sheets loaded. Allowed: {len(allowed_ids_sheet1)}, Blocked: {len(blocked_ids)}, Already Cloned GID: {len(sheet1_cloned_gids)}")
+             # Define blocking statuses found *within Sheet1*
+             if status in ["DONE", "APPROVED", "TRANSLATED", "ERROR_TRANSLATING", "ERROR_CLONING", "ERROR_FETCHING_SOURCE", "ERROR_EXCEPTION"]:
+                 blocked_ids_sheet1.add(pid)
+             else: # Includes PENDING, empty status, etc.
+                 allowed_ids_sheet1.add(pid)
 
+             if cloned_gid:
+                 sheet1_cloned_gids.add(pid) # Add ID to set if GID exists
+
+        logger.info(f"📋 Sheet1 processed. Allowed Status IDs: {len(allowed_ids_sheet1)}, Blocked Status IDs: {len(blocked_ids_sheet1)}, Already Cloned GIDs: {len(sheet1_cloned_gids)}")
+
+    except gspread.exceptions.WorksheetNotFound:
+         logger.error(f"❌ Worksheet '{SHEET1_NAME}' not found. Cannot proceed.")
+         return []
     except Exception as e:
-        logger.exception(f"🔥 Failed loading Google Sheets for filtering: {e}")
-        return [] # Return empty on sheet error
+        logger.exception(f"🔥 Failed loading or processing Sheet1 data for filtering: {e}")
+        return []
 
-    # Filter list based on loaded sets
+    # Filter list based only on Sheet1 data
     pre_filter_count = len(unique_sales)
     products_to_process_initially = [
         p for p in unique_sales
-        # Use 'Product ID' with .get() for safety
+        # Keep if ID was found in Sheet1 with allowed status (implicit via allowed_ids set)
         if str(p.get("Product ID","")).strip() in allowed_ids_sheet1
-        and str(p.get("Product ID","")).strip() not in blocked_ids
+        # AND ensure its ID wasn't found with a blocking status in Sheet1
+        and str(p.get("Product ID","")).strip() not in blocked_ids_sheet1
+        # AND ensure it doesn't already have a Cloned GID recorded in Sheet1
         and str(p.get("Product ID","")).strip() not in sheet1_cloned_gids
     ]
-    logger.info(f"🧹 Filtered by Sheets from {pre_filter_count} to {len(products_to_process_initially)} items.")
+    logger.info(f"🧹 Filtered based on Sheet1 status/GID from {pre_filter_count} to {len(products_to_process_initially)} items.")
+    if not products_to_process_initially:
+        logger.info("No products eligible for cloning after Sheet1 filtering.")
+        return []
 
 
-    # === STEP 4: Simultaneous Processing Filter (Using CORRECT Key) ===
-    products_to_actually_clone = []
+    # === STEP 4: Simultaneous Processing Filter ===
+    products_to_actually_clone = [] # Initialize the FINAL list for *this specific run*
     skipped_concurrent = 0
-    with currently_processing_lock:
+    with currently_processing_lock: # Ensure only one thread/process enters here at a time
         for item in products_to_process_initially:
-            pid_str = str(item.get("Product ID", "")).strip() # Use 'Product ID'
+            pid_str = str(item.get("Product ID", "")).strip()
             if not pid_str: continue
 
             if pid_str in currently_processing_ids:
                 skipped_concurrent += 1
-                continue
-            products_to_actually_clone.append(item)
-            currently_processing_ids.add(pid_str) # Add to set within lock
+                continue # Skip this product, another process is handling it
+
+            products_to_actually_clone.append(item) # Add to the final list
+            currently_processing_ids.add(pid_str)   # Claim this ID within the lock
     logger.info(f"🛡️ Concurrency filter complete: Attempting to clone {len(products_to_actually_clone)}. Skipped {skipped_concurrent}.")
+    if not products_to_actually_clone:
+        logger.info("No products left to clone after concurrency filter.")
+        return []
 
 
-    # === STEP 5: Clone Products (Loop through filtered list) ===
-    for item in products_to_actually_clone:
-        original_pid_str = str(item.get("Product ID", "")).strip() # Use 'Product ID'
-        if not original_pid_str: continue # Should have been filtered, but safe check
+    # === STEP 5: Clone Products (Loop) ===
+    for item in products_to_actually_clone: # Iterate over the final list
+        original_pid_str = str(item.get("Product ID", "")).strip()
+        if not original_pid_str: continue # Should not happen, but safe check
+
+        # Initialize variables for this product
+        cloned_product_gid = None
+        cloned_product_title = ""
+        cloned_product_rest_id = None
+        new_product_handle = None
+        product_create_successful = False
+        collection_add_success = None
 
         try:
             logger.info(f"--- Cloning Original Product ID: {original_pid_str} ---")
 
-            # Fetch source data using original_pid_str
-            source_product_data = fetch_product_by_id(original_pid_str) # Assumes uses SOURCE creds
+            # --- Fetch source data ---
+            source_product_data = fetch_product_by_id(original_pid_str)
             if not source_product_data:
-                logger.warning(f"⚠️ Could not fetch source data for {original_pid_str}, skipping.")
                 update_product_status_in_sheet(original_pid_str, "ERROR_FETCHING_SOURCE")
                 continue
 
             source_title = source_product_data.get("title", "").strip()
             if not source_title:
-                 logger.warning(f"⚠️ Source product {original_pid_str} has empty title, skipping.")
                  update_product_status_in_sheet(original_pid_str, "ERROR_EMPTY_SOURCE_TITLE")
                  continue
 
-            # Prepare handle and payload
+            # --- Check Handle ---
             cloned_handle = f"{slugify(source_title)}-{original_pid_str[-5:]}"
-            logger.info(f"[{original_pid_str}] Generated handle for target: '{cloned_handle}'")
-
-            # Check target handle
-            existing_target_product = fetch_product_by_handle(
-                cloned_handle, target_store_info["shopify_store_url"], target_store_info["shopify_api_key"]
-            )
+            existing_target_product = fetch_product_by_handle(cloned_handle, target_store_url, target_api_key)
             if existing_target_product:
-                logger.warning(f"⚠️ Handle '{cloned_handle}' already exists in target store. Skipping.")
                 update_product_status_in_sheet(original_pid_str, "SKIPPED_HANDLE_EXISTS")
                 continue
 
-            # Construct payload (Use your full payload structure)
-            product_payload = { "product": { "title": source_title, "body_html": source_product_data.get("body_html", ""), "handle": cloned_handle, "status": "draft", "images": [{"src": img["src"]} for img in source_product_data.get("images", []) if img.get("src")], "options": [{"name": o.get("name", ""), "values": o.get("values", [])} for o in source_product_data.get("options", []) if o.get("name") and o.get("values")], "variants": [ {"option1": v.get("option1"), "option2": v.get("option2"), "option3": v.get("option3"), "price": v.get("price"), "sku": f"CLONE-{original_pid_str}-{v.get('sku', v.get('id', ''))}", "inventory_management": v.get("inventory_management"), "inventory_policy": v.get("inventory_policy"), "requires_shipping": v.get("requires_shipping", True), "weight": v.get("weight"), "weight_unit": v.get("weight_unit")} for v in source_product_data.get("variants", []) ], "product_type": source_product_data.get("product_type", ""), "vendor": source_product_data.get("vendor", ""), "tags": "ClonedForTranslation", }}
-            if not product_payload["product"]["options"]: del product_payload["product"]["options"]
-            if not product_payload["product"]["variants"]: del product_payload["product"]["variants"]
+            # --- Construct REST Payload (Active & Published) ---
+            logger.info(f"   Preparing REST POST payload (Active & Published)...")
+            # (Payload preparation logic - use your existing detailed logic here)
+            title = source_title
+            description = source_product_data.get("body_html", "")
+            vendor = source_product_data.get("vendor", "Default Vendor")
+            product_type = source_product_data.get("product_type", "Default Type")
+            tags_list = source_product_data.get("tags", [])
+            if isinstance(tags_list, str): tags_list = [t.strip() for t in tags_list.split(',') if t.strip()]
+            if not isinstance(tags_list, list): tags_list = []
+            if "ClonedForTranslation" not in tags_list: tags_list.append("ClonedForTranslation")
+            tags_string = ", ".join(tags_list)
+            images_input = [{"src": img.get("src")} for img in source_product_data.get("images", []) if isinstance(img, dict) and img.get("src")]
+            rest_options = []
+            option_names = []
+            source_options = source_product_data.get('options', [])
+            if isinstance(source_options, list) and source_options:
+                 for i, opt in enumerate(source_options):
+                     if isinstance(opt, dict) and opt.get('name'):
+                         rest_options.append({"name": opt['name'], "position": opt.get('position', i + 1)})
+                         option_names.append(opt['name'])
+            rest_variants_initial = []
+            source_variants = source_product_data.get('variants', [])
+            if isinstance(source_variants, list) and source_variants:
+                 for i, sv in enumerate(source_variants):
+                     if not isinstance(sv, dict): continue
+                     variant_payload = {
+                        "price": str(sv.get('price', '0.00')), "sku": f"CLONE-{original_pid_str}-{sv.get('sku', sv.get('id', ''))}",
+                        "compare_at_price": str(sv.get('compare_at_price')) if sv.get('compare_at_price') is not None else None,
+                        "barcode": sv.get('barcode'), "inventory_policy": "deny" if sv.get('inventory_management') == 'shopify' else "continue",
+                        "requires_shipping": sv.get('requires_shipping', True), "taxable": sv.get('taxable', True),
+                        "weight": sv.get('weight'), "weight_unit": sv.get('weight_unit', 'kg') if sv.get('weight') is not None else None,
+                        **({f"option{idx+1}": sv.get(f"option{idx+1}") for idx in range(len(option_names)) if sv.get(f"option{idx+1}") is not None})
+                    }
+                     rest_variants_initial.append({k: v for k, v in variant_payload.items() if v is not None})
 
-            # Create product API call
-            create_url = f"{ensure_https(target_store_info['shopify_store_url'])}/admin/api/2024-04/products.json"
-            # Modified line:
-            response = shopify_api_request("POST", create_url, api_key=target_store_info["shopify_api_key"], json=product_payload, timeout=90) # Increased to 90
+            product_payload = {
+                "product": {
+                    "title": title, "body_html": description, "handle": cloned_handle,
+                    "status": "active",     # Ensure Active
+                    "published": True,      # Ensure Published attempt via REST
+                    "vendor": vendor, "product_type": product_type, "tags": tags_string,
+                    **({"images": images_input} if images_input else {}),
+                    **({"options": rest_options} if rest_options else {}),
+                    **({"variants": rest_variants_initial} if rest_variants_initial else {}),
+                }
+            }
+            # --- End Payload Construction ---
 
-            # Process Response
+
+            # --- Create Product (REST POST) ---
+            logger.info(f"   [API Call - REST] Creating product...")
+            create_url = f"{ensure_https(target_store_url)}/admin/api/2024-04/products.json"
+            response = shopify_api_request("POST", create_url, api_key=target_api_key, json=product_payload, timeout=90)
+
+            # --- Process Response ---
             if response and response.status_code in [200, 201]:
                 new_product = response.json().get("product")
                 if new_product:
+                    # --- Step 1 (in loop): Extract Info & Log Success ---
                     cloned_product_gid = new_product.get("admin_graphql_api_id")
                     cloned_product_title = new_product.get("title", "")
                     cloned_product_rest_id = new_product.get("id")
+                    new_product_handle = new_product.get("handle")
+                    product_create_successful = True
 
-                    logger.info(f"✅ Cloned {original_pid_str} to {target_store_info['value']} -> GID: {cloned_product_gid}")
-                    created_products.append({ "original_id": original_pid_str, "cloned_id": cloned_product_rest_id, "cloned_gid": cloned_product_gid, "title": cloned_product_title, "handle": new_product.get("handle"), "store": target_store_info["value"] })
+                    logger.info(f"  [API Result - REST] Product Creation Successful.")
+                    logger.info(f"  ✅ Cloned {original_pid_str} -> GID: {cloned_product_gid}, REST ID: {cloned_product_rest_id} (Status: Active, Published via REST)")
+                    created_products.append({
+                        "original_id": original_pid_str, "cloned_id": cloned_product_rest_id,
+                        "cloned_gid": cloned_product_gid, "title": cloned_product_title,
+                        "handle": new_product_handle, "store": target_store_value
+                    })
 
-                    # Inside clone_products_to_target_store -> try block -> if new_product:
+                    # --- Step 2 (in loop): Publishing ---
+                    # Publishing is handled by "published: True" in the POST above.
+                    logger.info("  Publishing implicitly attempted via 'published: True' flag during creation.")
 
-                    # *** Update Sheet1 (Status, GID, Title) using the combined function ***
+
+                    # --- Step 3 (in loop): Add to Collection (REST POST Only) ---
+                    collection_add_success = None # Reset status
+                    if cloned_product_rest_id and pinterest_collection_rest_id:
+                        logger.info(f"  [API Call - REST] Adding product REST ID {cloned_product_rest_id} to collection REST ID {pinterest_collection_rest_id}...")
+                        try:
+                            collect_payload = {"collect": {"product_id": cloned_product_rest_id,"collection_id": int(pinterest_collection_rest_id)}}
+                            collect_endpoint = "collects.json"
+                            collect_url = f"{ensure_https(target_store_url)}/admin/api/2024-04/{collect_endpoint}"
+                            collect_response = shopify_api_request("POST", collect_url, api_key=target_api_key, json=collect_payload)
+
+                            if collect_response and collect_response.status_code in [200, 201]:
+                                collect_data = collect_response.json().get("collect")
+                                logger.info(f"  [API Result - REST] Add to collection successful. Collect ID: {collect_data.get('id') if collect_data else 'N/A'}")
+                                collection_add_success = True
+                            else:
+                                logger.error(f"  [API Result - REST] Add to collection failed. Status: {collect_response.status_code if collect_response else 'N/A'}. Check helper logs.")
+                                collection_add_success = False
+                        except Exception as add_e:
+                            logger.exception(f"  [API Result - REST] Exception during add to collection attempt: {add_e}")
+                            collection_add_success = False
+                    elif not pinterest_collection_rest_id:
+                        logger.info("  Skipping add to collection (No target collection REST ID configured).")
+                        collection_add_success = True # Not an error if not configured
+                    else:
+                         logger.warning("  Skipping add to collection (cloned_product_rest_id not available).")
+                    # --- END Step 3 ---
+
+
+                    # --- Step 4 (in loop): Update Google Sheet ---
+                    logger.info(f"  Updating Google Sheet for {original_pid_str}...")
                     sheet_updated_successfully = update_cloned_product_info_in_sheet(
                         product_id=original_pid_str,
-                        cloned_gid=cloned_product_gid,
+                        cloned_gid=cloned_product_gid, # Still pass GID
                         cloned_title=cloned_product_title,
-                        new_status="PENDING"  # <-- ADD THIS ARGUMENT
+                        new_status="PENDING",
+                        target_store=target_store_value
                     )
-                    # *** REMOVED the redundant 'if sheet_updated: update_product_status_in_sheet(...)' block ***
                     if not sheet_updated_successfully:
-                         # Log if the combined update failed, but don't call status update again
-                         logger.error(f"❌ Failed combined sheet update (GID/Title/Status) for {original_pid_str} after cloning.")
-                         # Status remains whatever it was before, or consider setting ERROR_SHEET_UPDATE here if needed
-                else:
-                    logger.error(f"❌ Clone succeeded (Status {response.status_code}) but no product data in response for {original_pid_str}.")
+                         logger.error(f"❌ Failed combined sheet update for {original_pid_str}.")
+                    if collection_add_success is False:
+                         logger.warning(f"Product {original_pid_str} created but failed add to collection {pinterest_collection_rest_id}.")
+                         # Consider updating status e.g., update_product_status_in_sheet(original_pid_str, "PENDING (CollectionFail)")
+                    # --- END Step 4 ---
+
+                else: # No 'product' in response
+                    logger.error(f"❌ Clone REST POST succeeded but no 'product' data for {original_pid_str}.")
                     update_product_status_in_sheet(original_pid_str, "ERROR_CLONE_RESPONSE")
-            else: # Cloning API call failed
+
+            else: # POST failed
                 status_code = response.status_code if response else 'N/A'
-                err_text = response.text if response else "No response"
-                logger.error(f"❌ Cloning failed for {original_pid_str} to store {target_store_info['value']}. Status: {status_code}. Response: {err_text[:500]}")
+                logger.error(f"❌ Cloning REST POST failed for {original_pid_str}. Status: {status_code}. Check logs.")
                 update_product_status_in_sheet(original_pid_str, "ERROR_CLONING")
 
         except Exception as e:
-            logger.exception(f"🔥 Exception during cloning loop for product {original_pid_str}: {e}")
-            if original_pid_str: update_product_status_in_sheet(original_pid_str, "ERROR_EXCEPTION")
+            logger.exception(f"🔥 Unhandled Exception during cloning loop for product {original_pid_str}: {e}")
+            if not product_create_successful and original_pid_str:
+                 update_product_status_in_sheet(original_pid_str, "ERROR_EXCEPTION")
 
         finally:
-            # --- Unlock processing for this ID ---
-            # This runs regardless of try/except outcome for IDs processed by this loop
+            # --- Release Lock ---
             with currently_processing_lock:
                 if original_pid_str in currently_processing_ids:
                     currently_processing_ids.remove(original_pid_str)
-                    logger.debug(f"Removed {original_pid_str} from currently_processing_ids after processing.")
-                else:
-                     # If ID wasn't in the set, log a warning as it might indicate an issue
-                     # with how IDs were added in Step 4 vs how the loop is running.
-                     logger.warning(f"ID {original_pid_str} was unexpectedly NOT in currently_processing_ids in finally block.")
-            # --- End Unlock ---
+                    logger.debug(f"Released lock for {original_pid_str}.")
 
-    logger.info(f"🚩 Cloning phase complete. Successfully created {len(created_products)} product clones in target store this run.")
+    # --- After loop finishes ---
+    logger.info(f"🚩 Cloning phase complete. Successfully created {len(created_products)} product clones in target store '{target_store_value}' this run.")
     return created_products
 
+# --- END function ---
+
+# --- END MODIFIED function ---
+
+# --- END MODIFICATION ---
 
 @export_bp.route("/generate_sales_sheet", methods=["POST"])
 def generate_sales_sheet():
@@ -837,17 +1055,22 @@ def update_product_title_and_description(
     # Return BOTH the success status AND the final processed title string
     return overall_success, final_processed_title
 
-# --- Main Export Route ---
+# In export_routes.py
+
+# --- Modify this function ---
+# In export_routes.py
+
+# --- Modify this function ---
 @export_bp.route("/run_export", methods=["POST"])
 def run_export():
     """
     Handles the multi-phase export process:
     1. Review Only: Generate Google Sheet of products meeting sales criteria.
-    2. Phase 1: Clone products from source store (using Sheets data) to target store.
-    3. Phase 2: Translate cloned products in the target store (using Sheets data).
-    Uses environment variables for store config. Correctly handles dict keys.
+    2. Phase 1: Clone products (active & published, added to Pinterest collection).
+    3. Phase 2: Translate cloned products.
     """
     try:
+        # ... (Keep existing code for getting data, validation) ...
         data = request.get_json()
         if not data:
             return jsonify({"error": "Invalid request body. Expecting JSON."}), 400
@@ -873,55 +1096,77 @@ def run_export():
         if review_only and (not start_date or not end_date):
             return jsonify({"error": "Missing required fields: start_date or end_date for review_only"}), 400
 
-        # --- Get Target Store Credentials (If needed for Phase 1 or 2) ---
-        target_store = None
+        # --- Get Target Store Config (If needed for Phase 1 or 2) ---
+        target_store_config = None
         if run_phase_1 or run_phase_2:
-            target_store_url, target_api_key = get_store_credentials(store_value) # Uses helper
-            if not target_store_url or not target_api_key:
-                error_msg = f"Could not retrieve valid credentials for target store: '{store_value}'. Check SHOPIFY_STORES_CONFIG env var."
+            target_store_config = get_store_credentials(store_value) # Use updated function
+            if not target_store_config:
+                error_msg = f"Could not retrieve valid configuration for target store: '{store_value}'. Check SHOPIFY_STORES_CONFIG env var and store content."
                 logger.error(error_msg)
                 return jsonify({"error": error_msg}), 400
-            # Store as dict for passing to helpers
-            target_store = {
-                "value": store_value,
-                "shopify_store_url": target_store_url,
-                "shopify_api_key": target_api_key
-            }
-            logger.info(f"Using credentials for target store: {target_store.get('value')}")
+            logger.info(f"Using configuration for target store: {target_store_config.get('value')}")
 
         # --- Execute Phase ---
 
-        # Phase: Review Only (Generate Sheet)
+        # Phase: Review Only
         if review_only:
+            # ... (Keep existing review_only logic) ...
             logger.info("Executing run_export: review_only phase")
-            product_sales = get_sold_product_details(start_date, end_date, min_sales) # Uses SOURCE store creds implicitly
+            product_sales = get_sold_product_details(start_date, end_date, min_sales)
             if product_sales is None: return jsonify({"error": "Failed to retrieve sales data."}), 500
-            sheet_url = export_sales_to_sheet(product_sales) # Assumes this uses GOOGLE creds implicitly
+            sheet_url = export_sales_to_sheet(product_sales)
             if not sheet_url: return jsonify({"error": "Failed to export sales data to Google Sheet."}), 500
             logger.info(f"Sales sheet generated: {sheet_url}")
             return jsonify({"message": "✅ Sales sheet generated successfully.", "sheet_url": sheet_url})
 
+
         # Phase: Clone Only
         elif run_phase_1:
             logger.info("Executing run_export: run_phase_1 (Clone)")
-            if not target_store: return jsonify({"error": "Target store credentials missing."}), 500
+            if not target_store_config: return jsonify({"error": "Target store configuration missing."}), 500
 
-            # Get products from sheet marked 'PENDING' (check function's exact logic)
+            # Get Online Store Publication ID (using config)
+            online_store_publication_id = get_online_store_publication_id(
+                target_store_config["shopify_store_url"],
+                target_store_config["shopify_api_key"]
+            )
+            if not online_store_publication_id:
+                 logger.warning("Proceeding with cloning, but publishing to Online Store might fail.")
+
+            # --- Get Pinterest Collection GID from config ---
+            pinterest_collection_gid = target_store_config.get("pinterest_collection_gid")
+            pinterest_collection_rest_id = target_store_config.get("pinterest_collection_rest_id") # <-- Fetch REST ID
+    
+            if not pinterest_collection_rest_id:
+                 logger.warning(f"No 'pinterest_collection_rest_id' found in config for store '{store_value}'. Products cannot be added to the Pinterest collection via REST.")
+
+            if not pinterest_collection_gid:
+                logger.warning(f"No 'pinterest_collection_gid' found in config for store '{store_value}'. Products will not be added to the Pinterest collection.")
+            # --- End Get Pinterest GID ---
+
+            # Get products from sheet marked for cloning
             products_to_clone = get_pending_products_from_sheet()
             if products_to_clone is None: return jsonify({"error": "Failed to retrieve products from Google Sheet."}), 500
             if not products_to_clone: return jsonify({"message": "No products found in Sheet1 marked for cloning (e.g., PENDING)."}), 200
 
-            # Call the cloning function (ensure it's imported/defined correctly)
-            cloned_products_info = clone_products_to_target_store(products_to_clone, target_store)
+            # Call the cloning function, passing the required info
+            # Note: Pass the config dict as target_store_info
+            cloned_products_info = clone_products_to_target_store(
+                product_sales=products_to_clone,
+                target_store_info=target_store_config, # Pass the whole config dict
+                pinterest_collection_rest_id=pinterest_collection_rest_id # Pass the GID
+            )
             logger.info(f"Cloning phase complete. Cloned {len(cloned_products_info)} products this run.")
-            return jsonify({"message": f"✅ Cloning done for {len(cloned_products_info)} products to store '{store_value}'. Check sheet/logs for details.", "products": cloned_products_info })
+            # Updated message
+            return jsonify({"message": f"✅ Cloning done for {len(cloned_products_info)} products to store '{store_value}' (set active, attempted publish & add to collection). Check sheet/logs.", "products": cloned_products_info })
 
         # Phase: Translate Only
         elif run_phase_2:
+            # --- Make sure subsequent calls use the config correctly ---
             logger.info("Executing run_export: run_phase_2 (Translate)")
-            if not target_store: return jsonify({"error": "Target store credentials missing."}), 500
+            if not target_store_config: return jsonify({"error": "Target store configuration missing."}), 500
 
-            # Get translation methods/prompts correctly from JSON 'data'
+            # Get translation methods/prompts
             translation_methods = data.get("translation_methods", {})
             prompts = data.get("prompts", {})
             title_method = translation_methods.get("title", "google")
@@ -931,8 +1176,7 @@ def run_export():
             desc_prompt = prompts.get("description", "")
             logger.info(f"Using translation methods - T: {title_method}, D: {desc_method}, V: {variant_method}")
 
-            # Get products pending translation (Status='PENDING', has GID)
-            # Ensure get_products_pending_translation_from_sheet1 exists/imported
+            # Get products pending translation
             products_to_translate = get_products_pending_translation_from_sheet1()
             if products_to_translate is None: return jsonify({"error": "Failed to retrieve products for translation."}), 500
             if not products_to_translate: return jsonify({"message": "No products found in Sheet1 marked PENDING translation with GID."}), 200
@@ -943,12 +1187,9 @@ def run_export():
 
             # --- Loop through products ---
             for product_info in products_to_translate:
-                # --- Use Correct Keys ---
                 original_product_id = product_info.get('Product ID')
                 product_gid = product_info.get('Cloned Product GID')
-
-                # Log the data being processed
-                logger.info(f"DEBUG: Processing sheet row data: {product_info}") # <-- ADDED LOG
+                logger.debug(f"DEBUG: Processing sheet row data: {product_info}")
 
                 if not product_gid or not original_product_id:
                     logger.warning(f"Missing GID ('{product_gid}') or Original ID ('{original_product_id}') in sheet row. Skipping.")
@@ -957,12 +1198,15 @@ def run_export():
                     continue
 
                 logger.info(f"--- [START Phase 2 Processing] GID: {product_gid} (Original ID: {original_product_id}) ---")
+                overall_success = False # Initialize success for this product loop
 
                 try:
-                    # STEP A: Fetch
+                    # STEP A: Fetch (using config)
                     logger.info(f"  [{product_gid}] STEP A: Fetching product data from target store...")
                     cloned_product_data = fetch_product_by_gid(
-                        product_gid, target_store["shopify_store_url"], target_store["shopify_api_key"]
+                        product_gid,
+                        target_store_config["shopify_store_url"], # Use config dict
+                        target_store_config["shopify_api_key"]   # Use config dict
                     )
 
                     # STEP B: Check Fetch
@@ -974,13 +1218,14 @@ def run_export():
                     else:
                          logger.info(f"  [{product_gid}] STEP B SUCCEEDED: Fetch successful. Title: '{cloned_product_data.get('title')}'")
 
-                    # STEP C: Call Title/Desc/Handle Update Function
+
+                    # STEP C: Call Title/Desc/Handle Update Function (using config)
                     logger.info(f"  [{product_gid}] STEP C: Calling update_product_title_and_description (T:{title_method}, D:{desc_method})...")
-                    # Ensure update_product_title_and_description is defined correctly and imported
+                    # Ensure this function uses the passed url/key correctly
                     td_success, final_title_from_update = update_product_title_and_description(
                          product_gid=product_gid,
-                         target_store_url=target_store["shopify_store_url"],
-                         target_api_key=target_store["shopify_api_key"],
+                         target_store_url=target_store_config["shopify_store_url"], # Use config dict
+                         target_api_key=target_store_config["shopify_api_key"],   # Use config dict
                          target_language=language,
                          product_data=cloned_product_data,
                          title_method=title_method,
@@ -989,94 +1234,79 @@ def run_export():
                          desc_prompt=desc_prompt,
                          source_lang=source_lang
                     )
-
-                    # STEP D: Log Title/Desc/Handle Update Result
                     logger.info(f"  [{product_gid}] STEP D: Result from update_product_title_and_description: {td_success}")
 
-                    # ---> START REPLACEMENT BLOCK FOR STEP F <---
-                    variant_success = True # Assume success unless options exist and translation fails
+
+                    # STEP F: Variant Translation (using config)
+                    variant_success = True
                     if variant_method != 'none':
                          logger.info(f"  [{product_gid}] STEP F.1: Attempting to fetch options for variant translation ({variant_method})...")
-                         # *** CALL get_product_option_values to get correct structure ***
-                         # Ensure get_product_option_values is imported from export_variants_utils.py
+                         # Ensure this function uses the passed url/key correctly
                          options_to_translate = get_product_option_values(
                                product_gid,
-                               shopify_store_url=target_store["shopify_store_url"],
-                               shopify_api_key=target_store["shopify_api_key"]
+                               shopify_store_url=target_store_config["shopify_store_url"], # Use config dict
+                               shopify_api_key=target_store_config["shopify_api_key"]   # Use config dict
                          )
 
-                         # Check if fetching options failed (returned None)
                          if options_to_translate is None:
                               logger.error(f"  [{product_gid}] STEP F.1 FAILED: Could not fetch options via GraphQL. Skipping variant translation.")
-                              variant_success = False # Mark as failure if fetch fails
-                         # Check if options list is not empty
+                              variant_success = False
                          elif options_to_translate:
                              logger.info(f"  [{product_gid}] STEP F.2: Found {len(options_to_translate)} options. Starting translation loop...")
-                             all_options_succeeded = True # Track success for all options of this product
-                             # *** ADD LOOP to process each option individually ***
+                             all_options_succeeded = True
                              for option_data in options_to_translate:
-                                 # Basic validation of the option data structure
                                  if not isinstance(option_data, dict) or not option_data.get("id") or not option_data.get("name"):
                                       logger.warning(f"  [{product_gid}] Skipping invalid option data structure: {option_data}")
                                       continue
-
                                  logger.info(f"  [{product_gid}] STEP F.3: Calling update_product_option_values for Option '{option_data.get('name')}' (ID: {option_data.get('id')})...")
                                  logger.debug(f"  [{product_gid}] Option data passed: {option_data}")
-                                 # Ensure update_product_option_values is imported from export_variants_utils.py
+                                 # Ensure this function uses the passed url/key correctly
                                  single_option_success = update_product_option_values(
                                        product_gid=product_gid,
-                                       option=option_data, # Pass SINGLE option dict
+                                       option=option_data,
                                        target_language=language,
                                        source_language=source_lang,
                                        translation_method=variant_method,
-                                       shopify_store_url=target_store["shopify_store_url"],
-                                       shopify_api_key=target_store["shopify_api_key"]
+                                       shopify_store_url=target_store_config["shopify_store_url"], # Use config dict
+                                       shopify_api_key=target_store_config["shopify_api_key"]   # Use config dict
                                  )
                                  logger.info(f"  [{product_gid}] STEP F.4: Result for option '{option_data.get('name')}': {single_option_success}")
                                  if not single_option_success:
                                       all_options_succeeded = False
                                       logger.error(f"  [{product_gid}] Update failed for option '{option_data.get('name')}', stopping variant updates for this product.")
-                                      break # Stop processing variants for this product if one fails
-                             # *** END LOOP ***
-                             variant_success = all_options_succeeded # Overall variant success for this product
+                                      break
+                             variant_success = all_options_succeeded
                          else:
-                             # options_to_translate is an empty list []
                              logger.info(f"  [{product_gid}] STEP F.1: Product has no options defined in Shopify.")
-                             variant_success = True # No options is not an error
+                             variant_success = True
                     else:
                          logger.info(f"  [{product_gid}] STEP F: Skipping variant translation (method is 'none').")
-                    # ---> END REPLACEMENT BLOCK FOR STEP F <---
 
-
-                   # --- NEW STEP G BLOCK (updates status AND title) ---
+                   # STEP G: Update Sheet and Counters
                     overall_success = td_success and variant_success
                     final_status = "TRANSLATED" if overall_success else "ERROR_TRANSLATING"
-
                     title_to_write = final_title_from_update
 
-                    logger.info(f"  [{product_gid}] STEP G.1: Overall success: {overall_success}. Preparing sheet update for original ID {original_product_id} with Status='{final_status}' and Title='{title_to_write[:50]}...'")
+                    # Get the target store value from the config dict available in this scope
+                    target_store_value_for_update = target_store_config.get("value", "UNKNOWN") # <-- Get value here
+
+                    # Update log message slightly
+                    logger.info(f"  [{product_gid}] STEP G.1: Overall success: {overall_success}. Preparing sheet update for original ID {original_product_id} with Status='{final_status}', Title='{title_to_write[:50]}...', TargetStore='{target_store_value_for_update}'")
 
                     if original_product_id:
-                        # Call the function that updates Status, GID, and Title
-                        # Make sure this function ('update_cloned_product_info_in_sheet') is defined correctly in this file
+                        # Call the function that updates Status, GID, Title, AND Target Store
                         sheet_updated_successfully = update_cloned_product_info_in_sheet(
                             product_id=original_product_id,
-                            cloned_gid=product_gid,       # Pass the GID
-                            cloned_title=title_to_write,  # Pass the FINAL title
-                            new_status=final_status       # Pass the Status
+                            cloned_gid=product_gid,
+                            cloned_title=title_to_write,
+                            new_status=final_status,
+                            target_store=target_store_value_for_update # <-- PASS the target store value
                         )
                         logger.info(f"  [{product_gid}] STEP G.2: Sheet update call finished (Success: {sheet_updated_successfully}).")
                     else:
                          logger.warning(f"  [{product_gid}] STEP G: Cannot update sheet, original_product_id missing.")
-                    # --- End Sheet Update ---
 
                     # Update counters based on overall success
-                    if overall_success: successful_translations += 1; time.sleep(1.5)
-                    else: translation_errors += 1
-
-                except Exception as translate_err:
-                    # ... (keep existing exception handling) ...
-                    # Update counters
                     if overall_success: successful_translations += 1; time.sleep(1.5)
                     else: translation_errors += 1
 
@@ -1084,6 +1314,8 @@ def run_export():
                      logger.exception(f"❌ Uncaught Exception during translation loop for GID {product_gid}: {translate_err}")
                      translation_errors += 1
                      if original_product_id: update_product_status_in_sheet(original_product_id, "ERROR_EXCEPTION")
+                     overall_success = False
+
 
                 logger.info(f"--- [END Phase 2 Processing] GID: {product_gid} ---")
             # --- End Loop ---
@@ -1093,13 +1325,14 @@ def run_export():
             return jsonify({"message": final_message, "products_translated_count": successful_translations, "errors": translation_errors})
 
         else:
-             # No valid phase specified
              logger.warning("⚠️ No valid run phase (review_only, run_phase_1, run_phase_2) specified.")
              return jsonify({"error": "Invalid run phase specified"}), 400
 
     except Exception as e:
         logger.exception("🔥 Unhandled Error in /run_export")
         return jsonify({"error": f"An unexpected server error occurred: {str(e)}"}), 500
+
+# --- END MODIFICATION ---
 
 # --- Add Route for Cleanup ---
 @export_bp.route("/cleanup_sheet", methods=["POST"])

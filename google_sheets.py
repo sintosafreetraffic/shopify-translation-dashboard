@@ -5,6 +5,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import time
 from threading import Lock
 import pandas as pd # Keep for process_google_sheet
+import requests # For retry logic
 
 # Setup logger
 logger = logging.getLogger("google_sheets")
@@ -259,61 +260,61 @@ def mark_product_translation_done_in_sheet(original_product_id, sheet=None):
         logger.exception(f"❌ Error marking translation done for product Original ID {original_product_id}: {e}")
         return False
 
+# In google_sheets.py
+
 def export_sales_to_sheet(product_sales):
     """
     Adds new products from sales data to Sheet1 if not already present or DONE.
-    Updates sales counts for existing entries. Ensures headers. Includes retry logic.
-    Returns the sheet URL on success, empty string on failure.
+    Updates sales counts for existing entries. Ensures headers (including Target Store).
+    Includes retry logic. Returns the sheet URL on success, empty string on failure.
     """
     if not product_sales:
         logger.info("No product sales data provided to export_sales_to_sheet.")
-        # Return sheet URL even if no data added, as sheet should exist
-        return f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/edit#gid=0" # Link to Sheet1
+        return f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/edit#gid=0"
 
     logger.info(f"Exporting {len(product_sales)} products with sales data to Google Sheet...")
-    client = _get_gspread_client()
-    # Client is obtained internally by _get_worksheet
-    sheet1 = _get_worksheet(SHEET1_NAME) # <-- Corrected Call
-    sheet2 = _get_worksheet(SHEET2_NAME) # <-- Corrected Call
+    # Use internal helper which uses cached client
+    sheet1 = _get_worksheet(SHEET1_NAME)
+    sheet2 = _get_worksheet(SHEET2_NAME)
     if not sheet1 or not sheet2:
-        logger.error("Could not access Sheet1 or Sheet2. Aborting move.")
-        return
+        logger.error("Could not access Sheet1 or Sheet2. Aborting export.")
+        # Changed from return to return "" as per function docstring
+        return ""
 
     try:
         # --- Ensure Headers ---
-        # Define expected headers including the new column
-        headers = ["Product ID", "Product Title", "Sales Count", "Status", "Cloned Product GID", "Cloned Product Title"]
+        # Define expected headers including the new column ("Target Store" as Col G)
+        headers = ["Product ID", "Product Title", "Sales Count", "Status", "Cloned Product GID", "Cloned Product Title", "Target Store"] # <-- ADDED "Target Store"
         try:
             sheet1_header = _retry_gspread_operation(sheet1.row_values, 1)
-        except gspread.exceptions.APIError as e: # Catch error if sheet is totally empty
+        except gspread.exceptions.APIError as e:
              if "exceeds grid limits" in str(e): sheet1_header = []
              else: raise
         if sheet1_header != headers:
-            logger.warning(f"Updating Sheet1 header.")
-            # More robust header setting: clear only if needed, then update row 1
-            if sheet1_header: _retry_gspread_operation(sheet1.delete_rows, 1)
-            _retry_gspread_operation(sheet1.update, 'A1', [headers]) # Use update for header row
+            logger.warning(f"Updating Sheet1 header to: {headers}")
+            # Use batch_clear and update instead of delete_rows for potentially better performance/safety
+            if sheet1_header: # Only clear if header exists but is wrong
+                _retry_gspread_operation(sheet1.batch_clear, ['1:1'])
+            _retry_gspread_operation(sheet1.update, 'A1', [headers], value_input_option="USER_ENTERED")
 
         try:
             sheet2_header = _retry_gspread_operation(sheet2.row_values, 1)
-        except gspread.exceptions.APIError as e: # Catch error if sheet is totally empty
+        except gspread.exceptions.APIError as e:
              if "exceeds grid limits" in str(e): sheet2_header = []
              else: raise
         if sheet2_header != headers:
-            logger.warning(f"Updating Sheet2 header.")
-            if sheet2_header: _retry_gspread_operation(sheet2.delete_rows, 1)
-            _retry_gspread_operation(sheet2.update, 'A1', [headers])
+            logger.warning(f"Updating Sheet2 header to: {headers}")
+            if sheet2_header:
+                 _retry_gspread_operation(sheet2.batch_clear, ['1:1'])
+            _retry_gspread_operation(sheet2.update, 'A1', [headers], value_input_option="USER_ENTERED")
         # --- End Header Check ---
 
         # --- Get Existing Data Efficiently ---
         logger.info("Fetching existing data from sheets...")
-        # Fetch only Product ID and Status columns if possible? gspread might not support this easily.
-        # Sticking to get_all_records for simplicity for now.
         existing_sheet1_data = _retry_gspread_operation(sheet1.get_all_records)
         existing_sheet2_data = _retry_gspread_operation(sheet2.get_all_records)
         logger.info(f"Fetched {len(existing_sheet1_data)} records from {SHEET1_NAME}, {len(existing_sheet2_data)} from {SHEET2_NAME}.")
 
-        # Create lookups (using string IDs)
         sheet1_info = {str(row.get("Product ID","")): {"row_index": idx + 2, "status": str(row.get("Status","")).strip().upper()}
                        for idx, row in enumerate(existing_sheet1_data) if row.get("Product ID")}
         sheet2_ids = {str(row.get("Product ID","")) for row in existing_sheet2_data if row.get("Product ID")}
@@ -337,12 +338,11 @@ def export_sales_to_sheet(product_sales):
             if pid_str in sheet1_info:
                 info = sheet1_info[pid_str]
                 if info["status"] in ["DONE", "APPROVED"]:
-                     logger.info(f"Skipping {pid_str}: Found in '{SHEET1_NAME}' with status '{info['status']}', will be moved later.")
+                     logger.debug(f"Skipping {pid_str}: Found in '{SHEET1_NAME}' with status '{info['status']}', will be moved later.")
                      continue
                 else:
                      # Update sales count (Column C = 3)
                      try:
-                          # Fetch current value before deciding to update
                           current_cell_value = _retry_gspread_operation(sheet1.cell, info["row_index"], 3).value
                           current_sales_count = int(current_cell_value) if current_cell_value else 0
                      except (ValueError, TypeError): current_sales_count = 0
@@ -353,8 +353,8 @@ def export_sales_to_sheet(product_sales):
                           logger.debug(f"Queueing sales count update for {pid_str}: {current_sales_count} -> {count}")
             else:
                 # New product for Sheet1
-                # Ensure correct number of columns match header: ID, Title, Sales, Status, GID, Cloned Title
-                new_rows_to_append.append([pid_str, title, count, "PENDING", "", ""])
+                # Add placeholder for the new "Target Store" column (7th column)
+                new_rows_to_append.append([pid_str, title, count, "PENDING", "", "", ""]) # <-- ADDED empty string at the end
                 logger.debug(f"Queueing new row for {pid_str}.")
 
         # --- Perform Sheet Updates ---
@@ -374,8 +374,7 @@ def export_sales_to_sheet(product_sales):
 
     except Exception as e:
         logger.exception("❌ Failed during export_sales_to_sheet")
-        return "" # Return empty string on error
-
+        return ""
 
 def move_done_to_sheet2():
     """

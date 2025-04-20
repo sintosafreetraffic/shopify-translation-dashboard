@@ -18,7 +18,7 @@ load_dotenv() # Load environment variables from .env file
 
 # Load essential connection details
 SHOPIFY_STORE_URL = os.getenv("SHOPIFY_STORE_URL")
-SHOPIFY_API_ACCESS_TOKEN = os.getenv("SHOPIFY_API_ACCESS_TOKEN")
+SHOPIFY_API_ACCESS_TOKEN = os.getenv("SHOPIFY_API_KEY")
 API_VERSION = "2024-01" # Use a specific, reasonably current Shopify API version (Adjust if needed)
 
 # --- Load Target Collection ID ---
