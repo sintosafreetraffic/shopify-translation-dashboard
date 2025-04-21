@@ -10,9 +10,11 @@ from threading import Lock
 import requests # Requires: pip install requests
 import json # Needed for header check in move_done
 import random # Needed for jitter
+import gspread
+from openpyxl.utils import get_column_letter
 
 # --- Type Hinting Imports ---
-from typing import List, Dict, Any, Tuple, Optional, Union
+from typing import List, Dict, Any, Tuple, Optional, Union, Set
 
 # --- Setup logger ---
 # Use standard logger name, format allows easy filtering
@@ -26,23 +28,30 @@ GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID") # CRITICAL - Must be set in .env
 SHEET1_NAME = os.getenv("STATUS_SHEET_NAME", "Sheet1") # Main processing sheet
 SHEET2_NAME = os.getenv("ARCHIVE_SHEET_NAME", "Sheet2") # Archive sheet
 
-MAX_RETRIES = 3     # Max retries for Google API calls
-RETRY_DELAY = 2.0   # Initial delay in seconds for retries
+MAX_RETRIES = 50     # Max retries for Google API calls
+RETRY_DELAY = 5.0   # Initial delay in seconds for retries
 
 # --- Column Mapping for Multi-Store Status Updates ---
 # !!! IMPORTANT: Verify these column letters match your ACTUAL Sheet1 layout !!!
 STORE_COLUMN_MAP = {
-    # Example: If Spanish Status is Col D, GID is E, Title is F
-    "store_es": {"status": "D", "gid": "E", "title": "F"},
-    # Example: If Danish Status is Col G, GID is H, Title is I
-    "store_dk": {"status": "G", "gid": "H", "title": "I"},
-    # Add mappings for ALL your target stores here, matching Sheet1 columns
-    # "store_fr": {"status": "J", "gid": "K", "title": "L"},
-}
-
+    "store_es": {"status": 4, "gid": 5, "title": 6},  # D=4, E=5, F=6
+    "store_dk": {"status": 7, "gid": 8, "title": 9},  # G=6, H=7, I=8 (0-based)
+}   
 # --- Helper Functions ---
 _gspread_client = None
 _client_lock = Lock()
+
+def clean_header_key(header: str) -> str:
+    """Removes leading/trailing spaces and normalizes internal whitespace."""
+    if not isinstance(header, str):
+        return str(header) # Return string representation if not a string
+    # Remove leading/trailing whitespace
+    cleaned = header.strip()
+    # Optional: Replace multiple internal spaces with a single space
+    # cleaned = ' '.join(cleaned.split())
+    # Optional: Remove specific non-printing chars if needed (example: remove newline)
+    # cleaned = cleaned.replace('\n', '').replace('\r', '')
+    return cleaned
 
 def _get_gspread_client() -> Optional[gspread.Client]:
     """Authenticates and returns an authorized gspread client (cached). Thread-safe."""
@@ -143,109 +152,107 @@ def _retry_gspread_operation(operation: callable, *args, **kwargs) -> Any:
 
 # --- Public Utility Functions ---
 
-def ensure_sheet_headers(sheet_name: str = SHEET1_NAME) -> Tuple[Optional[List[str]], bool]:
+def ensure_sheet_headers(sheet_name: str) -> Tuple[Optional[List[str]], bool]:
     """
-    Checks Sheet1 headers and updates them if necessary based on STORE_COLUMN_MAP.
-    Returns (expected_headers, success_flag).
+    Checks Sheet headers and updates them if necessary to match the FIXED standard layout:
+    A=Product ID, B=Product Title, C=Sales Count,
+    D=Status ES, E=Cloned GID ES, F=Cloned Title ES,
+    G=Status DK, H=Cloned GID DK, I=Cloned Title DK
+    Returns (final_headers_list or None, success_boolean).
     """
-    logger.info(f"Checking/Ensuring headers for sheet '{sheet_name}'...")
-    sheet = _get_worksheet(sheet_name)
-    if not sheet: return None, False # Return None for headers if sheet fails
+    logger.info(f"Checking/Ensuring standard fixed headers for sheet '{sheet_name}'...")
 
-    # Define base headers + dynamically add store-specific headers
-    # Ensure consistent order by sorting map keys
-    expected_headers = ["Product ID", "Product Title", "Sales Count"] # Base columns A, B, C
-    sorted_store_keys = sorted(STORE_COLUMN_MAP.keys())
-    for store_key in sorted_store_keys:
-        # Derive suffix (e.g., ES, DA) from store key like 'store_es'
-        store_suffix = store_key.split('_')[-1].upper()
-        expected_headers.extend([f"Status {store_suffix}", f"Cloned GID {store_suffix}", f"Cloned Title {store_suffix}"])
-
-    logger.debug(f"Expected Headers: {expected_headers}")
+    sheet = None
+    current_header: Optional[List[str]] = None # To store headers read from sheet
 
     try:
-        current_header = []
-        # Use retry for the initial fetch operation
-        header_values = _retry_gspread_operation(sheet.get_values, 'A1:Z1') # Fetch a wide range
-        if header_values:
-             current_header = header_values[0]
-             # Trim empty trailing cells from what was read
-             while current_header and not current_header[-1]: current_header.pop()
+        # Get the worksheet object
+        sheet = _get_worksheet(sheet_name)
+        if not sheet:
+            logger.error(f"Failed to get worksheet '{sheet_name}' in ensure_sheet_headers.")
+            return None, False
+    except Exception as e:
+         logger.exception(f"Error getting worksheet '{sheet_name}': {e}")
+         return None, False
 
-        logger.debug(f"Current Headers read: {current_header}")
+    # --- Define the FIXED expected header structure ---
+    expected_headers = [
+        "Product ID",           # Col A
+        "Product Title",        # Col B
+        "Sales Count",          # Col C
+        "Status ES",            # Col D (Spanish Status)
+        "Cloned GID ES",        # Col E (Spanish GID)
+        "Cloned Title ES",      # Col F (Spanish Title)
+        "Status DK",            # Col G (Danish Status)
+        "Cloned GID DK",        # Col H (Danish GID)
+        "Cloned Title DK"       # Col I (Danish Title)
+    ]
+    # --- End fixed definition ---
 
+    logger.debug(f"Expected Fixed Headers: {expected_headers}")
+
+    try:
+        # Attempt to read the current header row
+        try:
+            # --- FIX 1: Use openpyxl utility ---
+            # Calculate column letter for fetching (e.g., N for 9 + 5 = 14)
+            fetch_range_end_col_letter = get_column_letter(len(expected_headers) + 5)
+            fetch_range = f"A1:{fetch_range_end_col_letter}1"
+            header_values = _retry_gspread_operation(sheet.get_values, fetch_range)
+
+            if header_values and isinstance(header_values, list) and len(header_values) > 0:
+                 current_header = header_values[0]
+                 while current_header and current_header[-1] == '':
+                     current_header.pop() # Trim empty cells from end
+            else:
+                 logger.warning(f"Could not read header row from '{sheet_name}' or it was empty.")
+                 current_header = []
+        except Exception as read_err:
+            logger.error(f"Error reading header row from '{sheet_name}': {read_err}")
+            current_header = [] # Assume empty on error
+
+        logger.debug(f"Current Headers read (or empty): {current_header}")
+
+        # Compare with the fixed list
         if current_header == expected_headers:
-            logger.info(f"✅ Headers in '{sheet_name}' are correct.")
-            return expected_headers, True # Return headers and success
+            logger.info(f"✅ Headers in '{sheet_name}' match the expected fixed layout.")
+            return expected_headers, True # Success, headers are correct
 
-        # Headers are missing or incorrect, attempt to update
-        logger.warning(f"Headers mismatch or missing. Attempting update in '{sheet_name}'...")
-        # Determine range to update based on expected headers length
-        header_range = f"A1:{gspread.utils.rowcol_to_a1(1, len(expected_headers))}"
+        # --- Headers need update ---
+        logger.warning(f"Headers mismatch/missing from expected fixed layout. Attempting update in '{sheet_name}'...")
+
+        # --- FIX 2: Use openpyxl utility ---
+        # Calculate end column letter (e.g., I for 9 columns)
+        header_range_end_col_letter = get_column_letter(len(expected_headers))
+        header_range = f"A1:{header_range_end_col_letter}1" # e.g., "A1:I1"
         logger.debug(f"Updating header range: {header_range}")
 
-        # Clear extra header columns if current header is longer than expected
-        if len(current_header) > len(expected_headers):
-             try:
-                 clear_range_start_col_letter = gspread.utils.rowcol_to_a1(1, len(expected_headers) + 1)[0]
-                 clear_range = f"{clear_range_start_col_letter}1:Z1" # Clear rest of row 1 to Z
-                 logger.debug(f"Clearing extra header cells in range: {clear_range}")
-                 _retry_gspread_operation(sheet.batch_clear, [clear_range])
-             except Exception as clear_err:
-                  logger.warning(f"⚠️ Failed to clear extra header cells: {clear_err}. Continuing with update...")
+        # --- Optional: Clear extra columns beyond the expected range ---
+        if current_header is not None and len(current_header) > len(expected_headers):
+            try:
+                clear_start_col_num = len(expected_headers) + 1
+                # --- FIX 3: Use openpyxl utility ---
+                clear_start_col_letter = get_column_letter(clear_start_col_num) # e.g., J
+                # Clear from J1 potentially up to Z1 (adjust Z if more cols needed)
+                clear_range = f"{clear_start_col_letter}1:Z1"
+                logger.debug(f"Clearing any extra header cells in range: {clear_range}")
+                _retry_gspread_operation(sheet.batch_clear, [clear_range])
+            except Exception as clear_err:
+                 logger.warning(f"⚠️ Failed to clear potential extra header cells: {clear_err}. Continuing update...")
+        # --- End Optional Clearing ---
 
-        # Update first row with expected headers
+        # Update the calculated range (e.g., A1:I1) with the fixed expected headers
         _retry_gspread_operation(sheet.update, header_range, [expected_headers], value_input_option="USER_ENTERED")
-        logger.info(f"✅ Headers updated in '{sheet_name}'. Please verify formatting if needed.")
-        return expected_headers, True # Return headers and success
+        logger.info(f"✅ Headers updated in '{sheet_name}' to match fixed layout.")
+        return expected_headers, True # Return the headers we just wrote
 
+    except gspread.exceptions.APIError as gae:
+         logger.error(f"❌ gspread API error during header check/update for '{sheet_name}': {gae}")
+         return current_header, False # Return read headers (if any), flag failure
     except Exception as e:
+        # Catch any other unexpected errors during the process
         logger.exception(f"❌ Unexpected error checking/updating headers for '{sheet_name}': {e}")
-        return None, False # Return None for headers on error
-
-# (Keep get_source_data if needed by import.py - code omitted for brevity unless requested)
-# def get_source_data(...) -> List[Tuple[int, str, List[Any]]]: ...
-
-
-def get_sheet_data_by_header(sheet_name: str = SHEET1_NAME) -> Tuple[Optional[List[str]], Optional[List[Dict[str, Any]]]]:
-    """
-    Gets all data from a sheet, returning header row and data rows as list of dicts.
-    Returns (None, None) on error. Uses retry wrapper.
-    """
-    logger.info(f"Fetching all values from '{sheet_name}' to process...")
-    sheet = _get_worksheet(sheet_name)
-    if not sheet: return None, None
-
-    try:
-        # Retry the fetching of all values
-        all_values = _retry_gspread_operation(sheet.get_all_values)
-        if not all_values or len(all_values) < 1:
-             logger.warning(f"Sheet '{sheet_name}' is empty or header not found.")
-             return None, [] # Return None for header, empty list for data is valid
-
-        header = all_values[0]
-        data_rows = all_values[1:]
-
-        # Convert rows to list of dictionaries, padding rows shorter than header
-        list_of_dicts = []
-        num_headers = len(header)
-        for row in data_rows:
-             # Efficiently create dict, handling potential short rows
-             row_data = dict(zip(header, row))
-             # Add missing keys if row was shorter (less common with get_all_values but safe)
-             if len(row) < num_headers:
-                 for i in range(len(row), num_headers):
-                     row_data[header[i]] = "" # Default to empty string
-             list_of_dicts.append(row_data)
-
-
-        logger.info(f"Fetched header ({len(header)} columns) and {len(list_of_dicts)} data rows from '{sheet_name}'.")
-        return header, list_of_dicts
-
-    except Exception as e:
-        # Error likely already logged by _retry_gspread_operation if it's API/connection
-        logger.exception(f"❌ Failed to load/process data from '{sheet_name}' using get_all_values: {e}")
-        return None, None
+        return current_header, False # Return read headers (if any), flag failure
 
 # --- NEW FUNCTION TO ADD ROWS ---
 def add_new_product_rows(rows_to_add: List[List[Any]], sheet_name: str = SHEET1_NAME) -> bool:
@@ -305,72 +312,184 @@ def find_row_index_by_id(sheet: gspread.Worksheet, product_id: Union[str, int], 
          logger.error(f"Error finding row for ID {product_id} in col {id_column_index}: {e}")
          return None
 
-
 def update_export_status_for_store(original_product_id: Union[str, int], target_store_value: str,
                                    new_status: str, cloned_gid: Optional[str], cloned_title: Optional[str],
                                    sheet_name: str = SHEET1_NAME) -> bool:
     """
-    Updates Status, GID, and Title in the columns specific to the target_store_value.
-    Uses batch update for efficiency after finding the row. Handles retries.
+    Updates Status, GID, and Title using column INDICES defined in STORE_COLUMN_MAP.
+    Converts indices to letters before creating A1 range notation for update.
     """
-    # Ensure product ID is a string for logging and lookup consistency
     original_product_id_str = str(original_product_id)
-
     if not original_product_id_str or not target_store_value:
         logger.warning("⚠️ update_export_status_for_store: Missing product_id or target_store_value.")
         return False
 
-    # --- Determine target columns ---
+    # --- Determine target column INDICES from map ---
     column_set = STORE_COLUMN_MAP.get(target_store_value)
     if not column_set:
         logger.error(f"❌ No column mapping found for target store '{target_store_value}' in STORE_COLUMN_MAP.")
         return False
 
-    # Safely get column letters, default to None if key missing in map
-    status_col = column_set.get('status')
-    gid_col = column_set.get('gid')
-    title_col = column_set.get('title')
+    status_col_idx = column_set.get('status')
+    gid_col_idx = column_set.get('gid')
+    title_col_idx = column_set.get('title')
 
-    if not status_col or not gid_col or not title_col:
-         logger.error(f"❌ Incomplete column mapping for target store '{target_store_value}' in STORE_COLUMN_MAP. Found: {column_set}")
+    # --- Validate that indices are positive integers ---
+    # (Assuming 1-based indexing in your map)
+    if not isinstance(status_col_idx, int) or not isinstance(gid_col_idx, int) or not isinstance(title_col_idx, int) or \
+       status_col_idx <= 0 or gid_col_idx <= 0 or title_col_idx <= 0:
+         logger.error(f"❌ Invalid non-positive integer column index found for store '{target_store_value}' in STORE_COLUMN_MAP. Found: {column_set}")
          return False
+    # --- End column index determination ---
 
     log_title_snip = str(cloned_title)[:50] + '...' if cloned_title else '(empty)'
+    # Log the column indices being used
     logger.info(f"Sheet Update Prep for Orig ID {original_product_id_str} / Store '{target_store_value}': "+
-                f"Status='{new_status}'({status_col}), GID='{cloned_gid or ''}'({gid_col}), Title='{log_title_snip}'({title_col})")
+                f"Status='{new_status}'(ColIdx:{status_col_idx}), GID='{cloned_gid or ''}'(ColIdx:{gid_col_idx}), Title='{log_title_snip}'(ColIdx:{title_col_idx})")
 
     try:
         sheet = _get_worksheet(sheet_name)
         if not sheet: return False
 
-        # Find row based on original Product ID (Column A = 1)
         logger.debug(f"Finding row for Product ID '{original_product_id_str}'...")
-        row_index = find_row_index_by_id(sheet, original_product_id_str, id_column_index=1)
+        # find_row_index_by_id returns 1-based row number
+        row_index = find_row_index_by_id(sheet, original_product_id_str, id_column_index=1) # Assumes Product ID is Col 1 (A)
 
-        if row_index:
-            # Prepare data for batch update
+        logger.info(f"[DEBUG Update] Found row_index: {row_index} (Type: {type(row_index)}) for PID {original_product_id_str}")
+
+        if row_index and isinstance(row_index, int) and row_index > 0:
+            # --- Convert column INDICES to LETTERS ---
+            try:
+                # get_column_letter expects 1-based index
+                status_col_letter = get_column_letter(status_col_idx) # e.g., 4 -> 'D'
+                gid_col_letter = get_column_letter(gid_col_idx)       # e.g., 5 -> 'E'
+                title_col_letter = get_column_letter(title_col_idx)     # e.g., 6 -> 'F'
+            except Exception as conversion_err:
+                 logger.error(f"❌ Failed to convert column indices ({status_col_idx},{gid_col_idx},{title_col_idx}) to letters: {conversion_err}")
+                 return False
+            # --- End Conversion ---
+
+            # Construct ranges using LETTERS and row index
+            status_range = f"{status_col_letter}{row_index}" # e.g., D109
+            gid_range = f"{gid_col_letter}{row_index}"       # e.g., E109
+            title_range = f"{title_col_letter}{row_index}"     # e.g., F109
+
+            logger.info(f"[DEBUG Update] Calculated ranges: Status='{status_range}', GID='{gid_range}', Title='{title_range}'")
+
             update_data = [
-                {"range": f"{status_col}{row_index}", "values": [[str(new_status or '')]]},
-                {"range": f"{gid_col}{row_index}",    "values": [[str(cloned_gid or '')]]},
-                {"range": f"{title_col}{row_index}",  "values": [[str(cloned_title or '')]]}
+                {"range": status_range, "values": [[str(new_status or '')]]},
+                {"range": gid_range,    "values": [[str(cloned_gid or '')]]},
+                {"range": title_range,  "values": [[str(cloned_title or '')]]}
             ]
-            logger.debug(f"Found row {row_index}. Attempting batch update...")
-            # Use retry wrapper for the batch update operation
+            logger.debug(f"Attempting batch update for row {row_index}...")
             _retry_gspread_operation(sheet.batch_update, update_data, value_input_option="USER_ENTERED")
             logger.info(f"✅ Updated Sheet Row {row_index} for Store '{target_store_value}'.")
             return True
         else:
-            # This warning means the product ID wasn't found in Column A
-            # This case should be handled by the calling script (export_weekly.py)
-            # by first adding missing rows if needed.
-            logger.warning(f"⚠️ Could not find row for original product_id={original_product_id_str} in '{sheet_name}' Col A during update attempt.")
-            return False # Indicate row wasn't found for update
+            logger.warning(f"⚠️ Could not find valid row index ({row_index}) for original product_id={original_product_id_str} in '{sheet_name}' Col A during update attempt.")
+            return False
     except Exception as e:
-        # Error likely logged by retry wrapper
         logger.exception(f"❌ Error in update_export_status_for_store for ID {original_product_id_str} / Store '{target_store_value}': {e}")
         return False
 
+# Add this function definition inside google_sheets_utils.py
 
+# In google_sheets_utils.py
+# Replace the existing get_sheet_data_by_header function with this:
+
+def get_sheet_data_by_header(sheet_name: str = SHEET1_NAME) -> Tuple[Optional[List[str]], Optional[List[Dict[str, str]]]]:
+    """
+    Fetches all data from a sheet using the first row as headers.
+    Uses get_all_values() and manually creates the list of dictionaries.
+    Returns the header row as a list and the data rows as a list of dictionaries.
+    Returns (None, None) on failure.
+    """
+    logger.info(f"Fetching all data (using get_all_values) with headers from sheet '{sheet_name}'...")
+    sheet = _get_worksheet(sheet_name)
+    if not sheet:
+        logger.error(f"Cannot fetch data, failed to get worksheet '{sheet_name}'.")
+        return None, None
+
+    try:
+        # Fetch ALL cell values as a list of lists using retry
+        all_values = _retry_gspread_operation(sheet.get_all_values)
+
+        if not all_values:
+            logger.warning(f"Sheet '{sheet_name}' appears to be empty or could not be read via get_all_values.")
+            return None, None # Return None if sheet is empty or read failed
+
+        # First row is the header
+        header = all_values[0]
+        # Data rows are the rest
+        data_rows = all_values[1:]
+
+        if not header:
+             logger.error(f"Sheet '{sheet_name}' has data rows but the header row is empty.")
+             return None, None # Cannot proceed without headers
+
+        if not data_rows:
+            logger.info(f"Sheet '{sheet_name}' has header but no data rows.")
+            return header, [] # Return header and empty list
+
+        # Manually convert data rows to list of dictionaries
+        list_of_dicts = []
+        header_len = len(header)
+        for row_idx, row_values in enumerate(data_rows, start=2): # Start from row 2 for logging
+            # Pad row with empty strings if shorter than header
+            padded_row = row_values + [''] * (header_len - len(row_values))
+            # Create dict using header as keys, ensuring values are strings
+            row_dict = {str(h): str(padded_row[i]) for i, h in enumerate(header)}
+            list_of_dicts.append(row_dict)
+
+        logger.info(f"Successfully fetched header ({len(header)} columns) and {len(list_of_dicts)} data rows from '{sheet_name}' (using get_all_values).")
+        return header, list_of_dicts
+
+    except Exception as e:
+        # Catch errors during get_all_values or dict conversion
+        logger.exception(f"❌ Failed to get/process sheet data using get_all_values for '{sheet_name}': {e}")
+        return None, None
+    
+# In google_sheets_utils.py
+# Add necessary imports if missing: from typing import Optional, Set
+# Make sure ARCHIVE_SHEET_NAME is defined (e.g., ARCHIVE_SHEET_NAME = "Sheet2")
+
+ARCHIVE_SHEET_NAME = "Sheet2"
+
+# In google_sheets_utils.py
+# Make sure ARCHIVE_SHEET_NAME is defined (e.g., from os.getenv)
+# Make sure logger, _get_worksheet, _retry_gspread_operation are defined
+
+def get_archived_product_ids(sheet_name: str = ARCHIVE_SHEET_NAME) -> Optional[Set[str]]: # Needs "Set" and "Optional" from typing
+    """
+    Fetches all Product IDs from the first column of the specified archive sheet.
+    Assumes the first column contains Product IDs and the first row is a header.
+    Returns a set of Product IDs (as strings) or None on failure.
+    """
+    logger.info(f"Fetching archived Product IDs from column A of sheet '{sheet_name}'...")
+    sheet = _get_worksheet(sheet_name)
+    if not sheet:
+        logger.error(f"Cannot fetch archived IDs, failed to get worksheet '{sheet_name}'.")
+        return None
+
+    try:
+        # Fetch all values from the first column (A) using retry
+        id_list = _retry_gspread_operation(sheet.col_values, 1) # col_values uses 1-based index
+
+        if not id_list or len(id_list) <= 1: # Check if list is empty or only contains header
+            logger.info(f"No archived Product IDs found (or only header) in column A of '{sheet_name}'.")
+            return set() # Uses built-in set() constructor
+
+        # Assume first row is header, skip it [1:]. Convert rest to strings and filter empties.
+        # Uses set comprehension {}
+        archived_ids = {str(pid).strip() for pid in id_list[1:] if str(pid).strip()}
+
+        logger.info(f"Successfully fetched {len(archived_ids)} unique archived Product IDs from '{sheet_name}'.")
+        return archived_ids
+
+    except Exception as e:
+        logger.exception(f"❌ Failed to get archived Product IDs from '{sheet_name}': {e}")
+        return None
+    
 def move_done_to_sheet2():
     """
     Moves completed rows (based on STORE_COLUMN_MAP statuses like DONE_*, TRANSLATED, APPROVED)
@@ -471,5 +590,122 @@ def move_done_to_sheet2():
         # Error logged by retry wrapper or here
         logger.exception(f"❌ Failed during move_done_to_sheet2 process: {e}")
 
+# Add this function to google_sheets_utils.py
+# Make sure STORE_COLUMN_MAP, SHEET1_NAME, ARCHIVE_SHEET_NAME are accessible
+# Ensure logger, _get_worksheet, _retry_gspread_operation, get_sheet_data_by_header exist
 
-# --- Add other Google Sheet utility functions as needed ---
+def move_fully_done_to_sheet2():
+    """
+    Moves rows where ALL configured stores have a 'DONE_STORE_*' status
+    from Sheet1 to Sheet2 and deletes them from Sheet1 using worksheet.delete_rows().
+    Returns True if processing completed (whether rows were moved or not), False on error.
+    """
+    logger.info(f"Checking for fully completed rows to move from '{SHEET1_NAME}' to '{ARCHIVE_SHEET_NAME}'...")
+    sheet1 = _get_worksheet(SHEET1_NAME)
+    sheet2 = _get_worksheet(ARCHIVE_SHEET_NAME)
+    if not sheet1 or not sheet2:
+        logger.error(f"Could not access '{SHEET1_NAME}' or '{ARCHIVE_SHEET_NAME}'. Aborting move.")
+        return False # Indicate failure to access sheets
+
+    try:
+        # Fetch header and data using the reliable helper
+        header, all_data = get_sheet_data_by_header(SHEET1_NAME) # Assumes this reads fresh data
+        if header is None or all_data is None:
+            logger.error(f"Failed to fetch data from '{SHEET1_NAME}'. Aborting move.")
+            return False
+        if not all_data:
+            logger.info(f"📭 No data rows found in '{SHEET1_NAME}' to process for moving.")
+            return True # No rows to move is not an error
+
+        # Get configured store keys and required headers
+        # Ensure STORE_COLUMN_MAP is accessible here
+        store_keys = list(STORE_COLUMN_MAP.keys())
+        required_status_headers = []
+        all_headers_present = True
+        for store_key in store_keys:
+             # Get configured header name (ensure SHOPIFY_STORES_CONFIG is parsed before this)
+             # This part requires access to the parsed config or assumes STORE_COLUMN_MAP holds headers directly
+             # For simplicity, let's assume STORE_COLUMN_MAP holds header names now based on previous fixes
+             # If STORE_COLUMN_MAP holds indices, need to get header name from the sheet1_header list
+             status_header = STORE_COLUMN_MAP.get(store_key, {}).get('sheet_status_col_header') # Assumes map keys match store_config keys
+             if not status_header: # Fallback calculation if config key missing
+                  store_suffix = store_key.split('_')[-1].upper()
+                  status_header = f"Status {store_suffix}"
+                  logger.warning(f"Using calculated status header '{status_header}' for store '{store_key}' in move function.")
+
+             if status_header not in header:
+                  logger.error(f"Required status header '{status_header}' for store '{store_key}' not found in sheet header: {header}. Aborting move.")
+                  all_headers_present = False
+                  break
+             required_status_headers.append(status_header)
+
+        if not all_headers_present:
+             return False # Cannot proceed if expected headers are missing
+
+        logger.debug(f"Checking completion across status columns: {required_status_headers}")
+
+        rows_to_move_data = []
+        row_indices_to_delete = [] # Store 1-based indices
+
+        # Iterate backwards through the indices (0-based for list `all_data`)
+        for idx in range(len(all_data) - 1, -1, -1):
+            row_dict = all_data[idx]
+            current_sheet_row_index = idx + 2 # Sheet index is 1-based, +1 for header
+
+            # --- Check if ALL required stores are DONE ---
+            all_stores_done = True
+            if not store_keys: # Handle empty config case
+                 all_stores_done = False
+            for i, store_key in enumerate(store_keys):
+                status_col_name = required_status_headers[i] # Get the correct header name
+                # Construct the specific DONE status string for this store
+                expected_done_status = f"DONE_{store_key.upper()}" # e.g., DONE_STORE_ES
+                status_val = str(row_dict.get(status_col_name, "")).strip().upper()
+
+                if status_val != expected_done_status:
+                    all_stores_done = False
+                    break # No need to check other stores for this row
+            # --- End Check ---
+
+            if all_stores_done:
+                logger.info(f"Marking sheet row {current_sheet_row_index} for moving (All configured stores DONE). PID: {row_dict.get('Product ID', 'N/A')}")
+                # Convert dict back to list in header order for appending
+                row_values = [row_dict.get(h, "") for h in header]
+                rows_to_move_data.append(row_values)
+                # Store the 1-based sheet row index for deletion
+                row_indices_to_delete.append(current_sheet_row_index)
+
+        # --- Perform Sheet Updates ---
+        if rows_to_move_data:
+            logger.info(f"Moving {len(rows_to_move_data)} fully completed rows...")
+            # Append data to Sheet2 (reverse collected data back to original order)
+            logger.info(f"Appending {len(rows_to_move_data)} rows to '{SHEET2_NAME}'...")
+            _retry_gspread_operation(sheet2.append_rows, rows_to_move_data[::-1], value_input_option="USER_ENTERED", insert_data_option="INSERT_ROWS")
+
+            # --- Delete rows from Sheet1 using delete_rows() ---
+            # Indices are already collected in descending order because we iterated backwards
+            logger.info(f"Deleting {len(row_indices_to_delete)} rows from '{SHEET1_NAME}'...")
+            deleted_count = 0
+            for row_index_to_delete in row_indices_to_delete:
+                 try:
+                     logger.debug(f"Attempting to delete row {row_index_to_delete} from {SHEET1_NAME}...")
+                     # Use the correct gspread method, wrapped in retry
+                     _retry_gspread_operation(sheet1.delete_rows, row_index_to_delete)
+                     deleted_count += 1
+                     logger.debug(f"Successfully deleted row {row_index_to_delete}.")
+                     time.sleep(0.3) # Add a small delay between deletes to be kind to API
+                 except Exception as delete_err:
+                     # Log error but continue trying to delete others
+                     # Error should be caught by _retry_gspread_operation first if it's APIError/ConnError
+                     logger.error(f"Failed to delete row {row_index_to_delete} from '{SHEET1_NAME}': {delete_err}")
+                     # Depending on severity, might want to stop: return False
+
+            logger.info(f"✅ Append to {SHEET2_NAME} complete. Attempted to delete {len(row_indices_to_delete)} rows, successfully deleted {deleted_count} from '{SHEET1_NAME}'.")
+            return True # Indicate rows were processed
+        else:
+            logger.info(f"✅ No rows found where *all* configured stores are DONE.")
+            return True # No rows needed moving
+
+    except Exception as e:
+        logger.exception(f"❌ Failed during move_fully_done_to_sheet2 process: {e}")
+        return False # Indicate failure
