@@ -13,6 +13,7 @@ import requests # For helpers defined here
 import re       # For helpers defined here
 from threading import Lock
 from typing import Any, Dict, Union, Optional, List, Tuple # For type hints
+import time 
 
 # --- Import TRUE Utility Modules ---
 # These modules contain logic NOT defined directly below
@@ -59,7 +60,7 @@ currently_processing_lock = Lock()
 currently_processing_ids = set()
 SOURCE_STORE_URL = os.getenv("SHOPIFY_STORE_URL") # Load needed globals after imports
 SOURCE_API_KEY = os.getenv("SHOPIFY_API_KEY")
-
+STATUS_SHEET_NAME = os.getenv("STATUS_SHEET_NAME", "Sheet1")
 
 # --- HELPER FUNCTION DEFINITIONS (Defined Locally in export_weekly.py) ---
 
@@ -220,6 +221,7 @@ def _attempt_single_product_clone(original_pid_str: str, target_store_config: di
     target_store_value = target_store_config.get("value", "UNKNOWN")
     pinterest_id = target_store_config.get("pinterest_collection_rest_id")
     status_sheet_name = os.getenv("STATUS_SHEET_NAME", "Sheet1")
+    STATUS_SHEET_NAME = os.getenv("STATUS_SHEET_NAME", "Sheet1")
 
     try:
         logger.info(f"{log_prefix} Attempting Clone")
@@ -456,6 +458,11 @@ def translate_cloned_product(product_gid: str, target_store_url: str, target_api
     logger.info(f"{log_prefix} --- Finished Translation Orchestration. Overall Success: {overall_success} ---")
     return overall_success
 
+# --- Constants ---
+STATUS_SHEET_NAME = os.getenv("STATUS_SHEET_NAME", "Sheet1")
+ARCHIVE_SHEET_NAME = os.getenv("ARCHIVE_SHEET_NAME", "Sheet2") # Define Archive Sheet Name
+
+# Assuming helper functions (_attempt_single_product_clone, etc.) are defined or imported
 
 # --- Main Execution Logic ---
 def main():
@@ -470,167 +477,395 @@ def main():
     TARGET_STORES_CONFIG_JSON = os.getenv("SHOPIFY_STORES_CONFIG")
     GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
     GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE")
-    STATUS_SHEET_NAME = os.getenv("STATUS_SHEET_NAME", "Sheet1")
-    # ... (Keep validation checks) ...
-    critical_vars = { "Source Store URL": SOURCE_STORE_URL, "Source API Key": SOURCE_API_KEY, "Target Stores JSON": TARGET_STORES_CONFIG_JSON, "Google Sheet ID": GOOGLE_SHEET_ID, "Google Credentials File": GOOGLE_CREDENTIALS_FILE }; missing = [k for k, v in critical_vars.items() if not v];
-    if missing: logger.critical(f"❌ Missing env vars: {', '.join(missing)}. Exit."); return
-    if not os.path.exists(GOOGLE_CREDENTIALS_FILE): logger.critical(f"❌ Creds file not found: {GOOGLE_CREDENTIALS_FILE}. Exit."); return
-    try: target_stores_list = json.loads(TARGET_STORES_CONFIG_JSON); assert isinstance(target_stores_list, list); logger.info(f"Loaded {len(target_stores_list)} target stores.")
-    except Exception as e: logger.critical(f"❌ Failed parse stores config: {e}. Exit."); return
 
-    # --- 2. Sheet Setup ---
-    sheet1_header = None; sheet1_data_map = {};
-    try:
-        logger.info(f"Ensuring headers/fetching data: '{STATUS_SHEET_NAME}'")
-        expected_header, headers_ok = google_sheets_utils.ensure_sheet_headers(STATUS_SHEET_NAME)
-        if headers_ok and expected_header:
-            sheet1_header = expected_header; logger.info("Fetching sheet data..."); fetched_header, sheet1_all_data = google_sheets_utils.get_sheet_data_by_header(STATUS_SHEET_NAME);
-            if fetched_header != sheet1_header: logger.warning("Header mismatch fetch vs ensure."); sheet1_header = fetched_header if fetched_header else sheet1_header
-            if sheet1_all_data is not None and sheet1_header:
-                pid_col = "Product ID";
-                if pid_col in sheet1_header: valid_rows = 0; [ (sheet1_data_map.update({pid: r}), valid_rows := valid_rows + 1) for r in sheet1_all_data if (pid := str(r.get(pid_col, "")).strip()) ]; logger.info(f"Created map: {valid_rows} IDs.")
-                else: logger.error(f"'{pid_col}' header missing.")
-            elif sheet1_all_data is None: logger.error("Could not fetch sheet data.")
-        else: logger.error("Could not get header structure.")
-    except Exception as e: logger.error(f"Sheet setup error: {e}", exc_info=True)
+    # Log the critical vars being used (partial key for safety)
+    logger.info(f"--- Using Google Sheet ID: '{GOOGLE_SHEET_ID}'")
+    logger.info(f"--- Using Status Sheet Name: '{STATUS_SHEET_NAME}'")
+    logger.info(f"--- Using Archive Sheet Name: '{ARCHIVE_SHEET_NAME}'")
+    logger.info(f"--- Using Source Store URL: {SOURCE_STORE_URL}")
+    logger.info(f"--- Using Source API Key: {'********' + SOURCE_API_KEY[-4:] if SOURCE_API_KEY else 'Not Set!'}")
+    logger.info(f"--- Using Target Stores JSON: {'Present' if TARGET_STORES_CONFIG_JSON else 'Not Set!'}")
+    logger.info(f"--- Using Google Credentials File: {GOOGLE_CREDENTIALS_FILE}")
 
-    # --- 3. Get Sold Products ---
-    product_ids_to_export = []; sold_products_map = {};
+    critical_vars = {
+        "Source Store URL": SOURCE_STORE_URL, "Source API Key": SOURCE_API_KEY,
+        "Target Stores JSON": TARGET_STORES_CONFIG_JSON, "Google Sheet ID": GOOGLE_SHEET_ID,
+        "Google Credentials File": GOOGLE_CREDENTIALS_FILE
+    }
+    missing = [k for k, v in critical_vars.items() if not v]
+    if missing: logger.critical(f"❌ Missing env vars: {', '.join(missing)}. Exiting."); return
+    if GOOGLE_CREDENTIALS_FILE and not os.path.exists(GOOGLE_CREDENTIALS_FILE): logger.critical(f"❌ Creds file not found: {GOOGLE_CREDENTIALS_FILE}. Exiting."); return
+
     try:
+        target_stores_list = json.loads(TARGET_STORES_CONFIG_JSON)
+        assert isinstance(target_stores_list, list)
+        logger.info(f"Loaded {len(target_stores_list)} target stores from config.")
+        # Basic validation of store config structure
+        for idx, store_conf in enumerate(target_stores_list):
+             if not all(k in store_conf for k in ["value", "shopify_store_url", "shopify_api_key", "language", "sheet_status_col_header", "sheet_gid_col_header", "sheet_title_col_header"]):
+                  logger.critical(f"❌ Store config at index {idx} is missing required keys (value, shopify_store_url, shopify_api_key, language, sheet_status_col_header, sheet_gid_col_header, sheet_title_col_header). Content: {store_conf}. Exiting.")
+                  return
+    except Exception as e:
+        logger.critical(f"❌ Failed parse stores config JSON or validation: {e}. Exiting."); return
+
+    # --- 2. Initial Sheet Setup & Data Load ---
+    sheet1_header = None
+    sheet1_data_map = {}
+    try:
+        logger.info(f"Initial setup for sheet: '{STATUS_SHEET_NAME}'")
+        confirmed_header_list, headers_ok = google_sheets_utils.ensure_sheet_headers(STATUS_SHEET_NAME)
+        if not headers_ok or not confirmed_header_list:
+             logger.error(f"Failed initial header ensure/verify for {STATUS_SHEET_NAME}. Cannot proceed reliably.")
+             return
+        logger.info(f"Headers OK for {STATUS_SHEET_NAME}.")
+        sheet1_header = confirmed_header_list
+
+        logger.info(f"Fetching initial data from '{STATUS_SHEET_NAME}'...")
+        # Assuming get_sheet_data_by_header uses get_all_values and manual dict creation now
+        fetched_header, sheet1_all_data = google_sheets_utils.get_sheet_data_by_header(STATUS_SHEET_NAME)
+
+        if fetched_header and sheet1_all_data is not None:
+            if fetched_header != sheet1_header:
+                 logger.warning("Header read during data fetch differs from header ensured! Using header from data fetch.")
+                 sheet1_header = fetched_header # Trust header associated with the data
+
+            pid_col = "Product ID"
+            if pid_col in sheet1_header:
+                valid_rows = 0
+                for r_dict in sheet1_all_data:
+                    pid_val = str(r_dict.get(pid_col, "")).strip()
+                    if pid_val: sheet1_data_map[pid_val] = r_dict; valid_rows += 1
+                logger.info(f"Created initial map: {valid_rows} IDs processed.")
+            else:
+                logger.error(f"'{pid_col}' not in fetched header {sheet1_header}. Cannot build map.")
+                sheet1_data_map = {} # Ensure map is empty
+        else:
+             logger.error(f"Failed to fetch data/header from '{STATUS_SHEET_NAME}'. Cannot build map.")
+             sheet1_data_map = {} # Ensure map is empty
+
+    except Exception as e:
+        logger.error(f"Initial Sheet setup error: {e}", exc_info=True)
+        sheet1_header = None; sheet1_data_map = {}
+
+    if not sheet1_header or sheet1_data_map is None: # Check map exists
+         logger.critical("Exiting because sheet header or data map could not be loaded.")
+         return
+
+    # --- 3. Move Completed Rows (Archive) ---
+    logger.info(f"Attempting to move fully completed rows from '{STATUS_SHEET_NAME}' to '{ARCHIVE_SHEET_NAME}'...")
+    try:
+        # Ensure move_fully_done_to_sheet2 exists and uses STORE_COLUMN_MAP correctly
+        moved_rows_result = google_sheets_utils.move_fully_done_to_sheet2() # Returns True/False or None on error
+
+        # If rows were potentially moved/deleted, we MUST refresh the map
+        if moved_rows_result is not None:
+            logger.info("Move attempt finished. Refreshing data map from Sheet1...")
+            # --- Refresh Sheet1 Data Map ---
+            refetched_header, sheet1_all_data_refreshed = google_sheets_utils.get_sheet_data_by_header(STATUS_SHEET_NAME)
+            if refetched_header and sheet1_all_data_refreshed is not None:
+                sheet1_header = refetched_header # Update header just in case
+                sheet1_data_map = {} # Clear old map
+                pid_col = "Product ID"
+                if pid_col in sheet1_header:
+                    valid_rows = 0
+                    for r_dict in sheet1_all_data_refreshed:
+                         pid_val = str(r_dict.get(pid_col, "")).strip()
+                         if pid_val: sheet1_data_map[pid_val] = r_dict; valid_rows += 1
+                    logger.info(f"Refreshed map after move contains {valid_rows} IDs.")
+                else: logger.error("Product ID column missing after refetch! Map unusable."); sheet1_data_map = {}
+            else: logger.error("Failed to refetch data after moving rows! Map unusable."); sheet1_data_map = {}
+            # --- End Refresh ---
+        else: # move_fully_done_to_sheet2 returned None (error)
+             logger.error("Move completed rows step failed. Map may contain already archived items!")
+             # Consider exiting if archival is critical? For now, continue with potentially stale map.
+
+    except Exception as move_err:
+        logger.exception(f"Error during call to move_fully_done_to_sheet2: {move_err}")
+        logger.error("Continuing without moving rows...")
+
+    # Exit if map is now empty after potential refresh error
+    if not sheet1_header or not sheet1_data_map:
+         logger.critical("Exiting because sheet data map is empty or invalid after move/refresh attempt.")
+         return
+
+    # --- 4. Get Sold Products ---
+    product_ids_to_export = []
+    sold_products_map = {}
+    try:
+        # ... (sales fetch logic as before) ...
         end_date = datetime.now(timezone.utc); days_lookback = int(os.getenv("SALES_DAYS_LOOKBACK", 7)); start_date = end_date - timedelta(days=days_lookback); start_date_str = start_date.strftime('%Y-%m-%d'); end_date_str = end_date.strftime('%Y-%m-%d'); min_sales = int(os.getenv("MIN_SALES", 1)); logger.info(f"Fetching sales {start_date_str} to {end_date_str} (Min: {min_sales})")
-        sold_products_list = get_sold_product_details(start_date_str, end_date_str, min_sales) # Calls LOCAL function
-        if sold_products_list is None: logger.error("Sales fetch failed. Exit."); return
-        if not sold_products_list: logger.info("No products met sales criteria. Exit."); return
-        logger.info(f"Found {len(sold_products_list)} combinations."); temp_ids = set(); [ (temp_ids.add(pid_str), sold_products_map.setdefault(pid_str, {"title": p.get("title", "N/A"), "sales_count": p.get("sales_count", 0)})) for p in sold_products_list if (pid_val := p.get('product_id')) and (pid_str := str(pid_val)) ]; product_ids_to_export = sorted(list(temp_ids));
-        if not product_ids_to_export: logger.info("No valid IDs from sales. Exit."); return
-        logger.info(f"Processing {len(product_ids_to_export)} unique IDs.")
-    except Exception as e: logger.critical(f"Sales fetch error: {e}", exc_info=True); return
+        sold_products_list = get_sold_product_details(start_date_str, end_date_str, min_sales)
+        if sold_products_list is None: logger.error("Sales fetch failed.")
+        elif not sold_products_list: logger.info("No products met sales criteria.")
+        else: logger.info(f"Found {len(sold_products_list)} sold line items."); temp_ids = set(); [ (temp_ids.add(pid_str), sold_products_map.setdefault(pid_str, {"title": p.get("title", "N/A").strip(), "count": 0}), sold_products_map[pid_str].update(count=sold_products_map[pid_str].get('count',0)+p.get('quantity',1)) ) for p in sold_products_list if (pid_val := p.get('product_id')) and (pid_str := str(pid_val)) ]; product_ids_to_export = sorted(list(temp_ids)); logger.info(f"Processing {len(product_ids_to_export)} unique Product IDs from sales.")
+    except Exception as e: logger.critical(f"Sales fetch or processing error: {e}", exc_info=True)
 
-    # --- 3b. Add New Products to Sheet ---
-    # ... (Keep Add New Products logic using google_sheets_utils as before) ...
-    if sheet1_header:
-        existing_ids_in_sheet = set(sheet1_data_map.keys()); new_product_ids_to_add = [pid for pid in product_ids_to_export if pid not in existing_ids_in_sheet];
-        if new_product_ids_to_add:
-            logger.info(f"Adding {len(new_product_ids_to_add)} new products to sheet..."); rows_to_add = []; num_cols = len(sheet1_header);
-            for pid in new_product_ids_to_add: info = sold_products_map.get(pid, {}); row = [ pid, info.get("title", "N/A"), info.get("sales_count", 0) ]; row.extend([''] * (num_cols - len(row))); rows_to_add.append(row);
-            if google_sheets_utils.add_new_product_rows(rows_to_add, STATUS_SHEET_NAME):
-                logger.info("Added rows. Refetching map...");
-                try: # Re-fetch map
-                    hdr, data = google_sheets_utils.get_sheet_data_by_header(STATUS_SHEET_NAME);
-                    if data is not None and hdr: sheet1_header = hdr; sheet1_data_map = {}; valid_rows = 0; pid_col = "Product ID";
-                    if pid_col in hdr: [ (sheet1_data_map.update({pid: r}), valid_rows := valid_rows + 1) for r in data if (pid := str(r.get(pid_col, "")).strip()) ]; logger.info(f"Refreshed map ({valid_rows} IDs).")
-                    else: logger.error("ID column missing during refresh.");
-                except Exception as refetch_err: logger.error(f"Error refetching sheet: {refetch_err}", exc_info=True)
-            else: logger.error("Failed add new rows.")
-        else: logger.info("All sold products already in sheet.")
-    else: logger.warning("Skipping add new - sheet header unknown.")
+    # --- 5. Add New Products to Sheet (with Archive Check) ---
+    logger.info("Identifying newly sold products to potentially add...")
+    new_products_to_add_rows = [] # Will store list of lists for sheet append
+    pid_col_name = "Product ID"
+    title_col_name = "Product Title"
+    sales_col_name = "Sales Count"
 
-    success_translations = 0 # Initialize HERE
-    failed_translations = 0  # Initialize HERE
-    # -----------------------------------------
-    # --- 4. Process Each Target Store and Product ---
-    proc_count = 0; ok_clones = 0; fail_clones = 0; ok_trans = 0; fail_trans = 0;
-    target_stores = target_stores_list if isinstance(target_stores_list, list) else []
+    # Find products in sales but not in the current Sheet1 map (map is post-archive)
+    current_sheet_pids = set(sheet1_data_map.keys())
+    sold_pids_set = set(product_ids_to_export) # Already unique strings
+    newly_sold_pids = sold_pids_set - current_sheet_pids
 
-    for store_config in target_stores:
-        store_val = store_config.get("value"); store_url = store_config.get("shopify_store_url"); store_key = store_config.get("shopify_api_key"); store_lang = store_config.get("language") or "en";
-        if not store_val or not store_url or not store_key: logger.error(f"Skipping store due to missing config: {store_config}."); continue
+    if newly_sold_pids:
+        logger.info(f"Found {len(newly_sold_pids)} newly sold Product IDs not currently in {STATUS_SHEET_NAME}.")
+
+        # Check Sheet2 for Archived IDs
+        logger.info(f"Checking archive sheet '{ARCHIVE_SHEET_NAME}' for these IDs...")
+        # Assumes get_archived_product_ids exists in utils and returns set or None
+        archived_ids = google_sheets_utils.get_archived_product_ids(ARCHIVE_SHEET_NAME)
+
+        if archived_ids is None:
+            logger.error(f"Failed to retrieve archived IDs from {ARCHIVE_SHEET_NAME}. Skipping adding new products for safety.")
+            # new_products_to_add_rows remains empty
+        else:
+            logger.info(f"Found {len(archived_ids)} unique archived IDs in {ARCHIVE_SHEET_NAME}.")
+            products_to_actually_add = []
+            for pid_str in newly_sold_pids:
+                if pid_str not in archived_ids:
+                    sales_info = sold_products_map.get(pid_str, {})
+                    # Create row dict based on Sheet1 header order
+                    new_row_dict = {h: '' for h in sheet1_header} # Initialize all cols
+                    new_row_dict[pid_col_name] = pid_str
+                    new_row_dict[title_col_name] = sales_info.get('title', 'N/A')
+                    new_row_dict[sales_col_name] = sales_info.get('count', 0) # Use aggregated count
+
+                    # Convert dict to list in correct header order
+                    new_row_values = [new_row_dict.get(h, '') for h in sheet1_header]
+                    products_to_actually_add.append(new_row_values)
+                    logger.info(f"Product {pid_str} is new and not archived. Queued for addition to {STATUS_SHEET_NAME}.")
+                else:
+                    logger.info(f"Skipping addition of newly sold Product {pid_str} as it was found in archive sheet '{ARCHIVE_SHEET_NAME}'.")
+            new_products_to_add_rows = products_to_actually_add
+
+        logger.info(f"After checking archive, {len(new_products_to_add_rows)} products will be added to {STATUS_SHEET_NAME}.")
+    else:
+        logger.info("No newly sold products found that are not already in the sheet map.")
+
+    # Append the filtered list of new products to Sheet1
+    if new_products_to_add_rows:
+        logger.info(f"Appending {len(new_products_to_add_rows)} new products to {STATUS_SHEET_NAME}...")
+        # Ensure append_rows_to_sheet exists in utils
+        append_success = google_sheets_utils.append_rows_to_sheet(
+            new_products_to_add_rows,
+            sheet_name=STATUS_SHEET_NAME
+        )
+        if append_success:
+            logger.info(f"Successfully appended {len(new_products_to_add_rows)} rows.")
+            # Note: sheet1_data_map is now out of sync (missing these new rows)
+            # These rows WILL NOT be processed in the loop below in this run.
+            # They will be picked up on the *next* script execution.
+        else:
+            logger.error("Failed to append new products to the sheet.")
+    # --- End Add New Products ---
+
+    # --- Initialize Counters ---
+    success_translations = 0; failed_translations = 0; proc_count = 0; ok_clones = 0; fail_clones = 0;
+
+   # --- 6. Process Each Target Store and Product ---
+    product_ids_to_process = list(sheet1_data_map.keys()) # Process based on current map
+    logger.info(f"Starting processing loop for {len(product_ids_to_process)} products in map across {len(target_stores_list)} stores.") # Corrected variable name
+
+    for store_config in target_stores_list: # Corrected variable name
+        # --- Get Store Config ---
+        store_val = store_config.get("value")
+        store_url = store_config.get("shopify_store_url")
+        store_key = store_config.get("shopify_api_key")
+        store_lang = store_config.get("language") or "en"
+        # Get configured header names (ensure these keys are in SHOPIFY_STORES_CONFIG JSON)
+        status_col_hdr = store_config.get("sheet_status_col_header")
+        gid_col_hdr = store_config.get("sheet_gid_col_header")
+        title_col_hdr = store_config.get("sheet_title_col_header")
+        if not store_val or not store_url or not store_key or not status_col_hdr or not gid_col_hdr or not title_col_hdr:
+            logger.error(f"Skipping store due to missing config/headers in SHOPIFY_STORES_CONFIG: {store_config}.")
+            continue # Skip this store if config is incomplete
+
         logger.info(f"--- Processing Store: {store_val} (Lang: {store_lang}) ---")
+        logger.info(f"--- Using Sheet Columns: Status='{status_col_hdr}', GID='{gid_col_hdr}', Title='{title_col_hdr}' ---")
 
-        for original_pid in product_ids_to_export:
+        for original_pid in product_ids_to_process:
             proc_count += 1; log_prefix = f"[{original_pid} -> {store_val}]";
-            cloned_gid = None; cloned_title = None; clone_ok = False; trans_ok = None; current_sheet_status = "STARTED";
+            cloned_gid = None; cloned_title = None; clone_ok = False; trans_ok = None; current_sheet_status = "INIT";
 
-            # Status Check from sheet1_data_map (as before)
-            # ... [ Keep status check logic here using sheet1_data_map ] ...
-            skip = False;
+            # --- Status Check Block (Prioritizing Direct Read) ---
+            skip = False # Reset skip flag
+            status_from_map = "MAP_READ_FAILED"
+            direct_read_status = "DIRECT_READ_NOT_ATTEMPTED"
+            status_to_use_for_check = ""
+
+            logger.info(f"{log_prefix} [DEBUG] Top of status check for PID {original_pid}.")
             if original_pid in sheet1_data_map and sheet1_header:
-                row = sheet1_data_map[original_pid]; suffix = store_val.split('_')[-1].upper(); status_col = f"Status {suffix}"; gid_col = f"Cloned GID {suffix}"; title_col = f"Cloned Title {suffix}";
-                if status_col in row:
-                    status = str(row.get(status_col, "")).strip().upper(); done_statuses = {f"DONE_{store_val.upper()}", "APPROVED", "TRANSLATED"}; retry_errors = {"ERROR_TRANSLATING", "ERROR_VARIANT_TRANSLATION", "ERROR_MISSING_GID"};
-                    if status in done_statuses: logger.info(f"{log_prefix} Skip: Done status '{status}'."); skip = True;
-                    elif status.startswith("ERROR_") and status not in retry_errors: logger.info(f"{log_prefix} Skip: Non-retryable error '{status}'."); skip = True;
-                    elif status.startswith("ERROR_") and status in retry_errors:
-                        logger.warning(f"{log_prefix} Note: Retryable error '{status}'."); cloned_gid = row.get(gid_col, "").strip();
-                        if cloned_gid: logger.info(f"{log_prefix} Found GID: {cloned_gid}"); clone_ok = True; cloned_title = row.get(title_col, "").strip();
-                        else: logger.error(f"{log_prefix} Cannot retry '{status}': GID missing."); skip = True;
-                else: logger.warning(f"{log_prefix} Status column '{status_col}' missing.")
-            else: logger.warning(f"{log_prefix} Product ID not in sheet map.")
-            if skip: continue
+                row = sheet1_data_map[original_pid]
+                logger.info(f"{log_prefix} [DEBUG] PID found in sheet map.")
 
-            # --- Main Processing Block ---
+                status_col_expected = status_col_hdr # Use header name from store_config
+
+                key_exists_in_map = status_col_expected in row
+                logger.info(f"{log_prefix} [DEBUG] Does expected key '{status_col_expected}' exist in map keys? {key_exists_in_map}")
+
+                if key_exists_in_map:
+                    status_from_map_raw = row.get(status_col_expected, "")
+                    status_from_map = str(status_from_map_raw).strip().upper()
+                else:
+                    # FIX 1a: Key not found in map - Treat as blank, don't skip here
+                    logger.warning(f"{log_prefix} Configured status key '{status_col_expected}' NOT FOUND in map row keys. Assuming blank.")
+                    status_from_map = "MAP_KEY_NOT_FOUND" # Keep distinct status for logging if needed
+
+                # --- Attempt Direct Read from Sheet ---
+                try:
+                    # (Keep the full direct read try/except block here - from response #67)
+                    # It sets 'direct_read_status' to the value read or an error string
+                    logger.debug(f"{log_prefix} Attempting direct sheet read for status check...")
+                    temp_sheet = google_sheets_utils._get_worksheet(STATUS_SHEET_NAME)
+                    if temp_sheet:
+                        temp_row_index = google_sheets_utils.find_row_index_by_id(temp_sheet, original_pid, 1)
+                        if temp_row_index and isinstance(temp_row_index, int) and temp_row_index > 0:
+                            logger.debug(f"{log_prefix} Direct read found row index: {temp_row_index}")
+                            try:
+                                status_col_index_0based = sheet1_header.index(status_col_expected)
+                                direct_cell_value_obj = google_sheets_utils._retry_gspread_operation(temp_sheet.cell, temp_row_index, status_col_index_0based + 1)
+                                direct_cell_value = direct_cell_value_obj.value if direct_cell_value_obj else None
+                                direct_read_status = str(direct_cell_value).strip().upper() if direct_cell_value is not None else ''
+                                logger.info(f"{log_prefix} [DEBUG] Direct sheet read successful. Value='{direct_read_status}'")
+                            except ValueError: logger.warning(f"{log_prefix} [DEBUG] Direct read failed: Header index error..."); direct_read_status = "DIRECT_READ_HEADER_IDX_ERROR"
+                            except Exception as cell_read_err: logger.error(f"{log_prefix} [DEBUG] Error during direct cell read: {cell_read_err}"); direct_read_status = "DIRECT_READ_API_ERROR"
+                        else: logger.warning(f"{log_prefix} [DEBUG] Direct read failed: Cannot find row index ({temp_row_index})..."); direct_read_status = "DIRECT_READ_ROW_FIND_ERROR"
+                    else: logger.error(f"{log_prefix} [DEBUG] Direct read failed: Cannot get worksheet."); direct_read_status = "DIRECT_READ_SHEET_ERROR"
+                except Exception as direct_read_setup_err: logger.error(f"{log_prefix} [DEBUG] Error setting up direct read: {direct_read_setup_err}"); direct_read_status = "DIRECT_READ_SETUP_ERROR"
+                # --- End Direct Read Attempt ---
+
+                # --- Revised Decision Logic: Prioritize Direct Read ---
+                possible_direct_read_error_states = {
+                    "DIRECT_READ_FAILED", "DIRECT_READ_NOT_ATTEMPTED", "DIRECT_READ_EXCEPTION",
+                    "DIRECT_READ_SHEET_ERROR", "DIRECT_READ_ROW_FIND_ERROR",
+                    "DIRECT_READ_HEADER_IDX_ERROR", "DIRECT_READ_API_ERROR", "DIRECT_READ_SETUP_ERROR"
+                }
+                if direct_read_status not in possible_direct_read_error_states:
+                    status_to_use_for_check = direct_read_status
+                    logger.info(f"{log_prefix} [DEBUG] Using DIRECT read status ('{status_to_use_for_check}') for skip decision.")
+                else:
+                    status_to_use_for_check = status_from_map if status_from_map not in ["MAP_READ_FAILED", "MAP_KEY_NOT_FOUND"] else ""
+                    logger.warning(f"{log_prefix} [DEBUG] Direct read failed ('{direct_read_status}'). Using MAP status ('{status_to_use_for_check}') for skip decision.")
+
+                current_sheet_status = status_to_use_for_check
+
+                # Perform the skip check using status_to_use_for_check
+                done_statuses = {f"DONE_{store_val.upper()}", "APPROVED", "TRANSLATED"}
+                logger.info(f"{log_prefix} [DEBUG] Final Decision Check: Using Status='{status_to_use_for_check}'. Comparing against {done_statuses}")
+
+                # FIX FOR POINT 1 (part 2) & Skip Logic:
+                if status_to_use_for_check in done_statuses:
+                    logger.info(f"Condition met: Status is in done_statuses.")
+                    skip = True
+                elif status_to_use_for_check == "MAP_KEY_NOT_FOUND": # Should be caught if key_exists_in_map check is robust
+                     logger.warning(f"{log_prefix} Status key was missing from map. Treating as needing processing.")
+                     skip = False # Don't skip if key was missing, treat as blank
+                     clone_ok = False
+                elif status_to_use_for_check.startswith("ERROR_"):
+                    logger.info(f"{log_prefix} Skip: Error status '{status_to_use_for_check}' found.") # Skip errors for now
+                    skip = True
+                elif status_to_use_for_check != '': # Any other non-blank status (e.g., PROCESSING)
+                     logger.info(f"{log_prefix} Skip: Non-blank/Non-Done status '{status_to_use_for_check}'.")
+                     skip = True # Skip PROCESSING etc. too
+                else: # Only remaining case is status_to_use_for_check == ''
+                    logger.info(f"{log_prefix} Proceed: Status ('{status_to_use_for_check}') requires processing.")
+                    skip = False
+                    clone_ok = False
+
+            else: # Product ID not found in the initial map
+                logger.warning(f"{log_prefix} Product ID {original_pid} not found in sheet map. Will attempt clone.")
+                current_sheet_status = "NOT_FOUND_IN_MAP"
+                skip = False # Allow processing
+
+            # FIX FOR POINT 3: Add Explicit Skip Logging
+            logger.info(f"{log_prefix} [DEBUG] Before continue check: skip = {skip}, clone_ok = {clone_ok}")
+            if skip:
+                status_reason = status_to_use_for_check if 'status_to_use_for_check' in locals() and status_to_use_for_check not in ["", "MAP_KEY_NOT_FOUND"] else current_sheet_status
+                logger.info(f"⏩ SKIPPING Product {original_pid} for store {store_val}. Reason/Status: '{status_reason}'")
+                # Add short delay even when skipping
+                time.sleep(random.uniform(0.1, 0.3))
+                continue # Skip to the next product/store iteration
+            # --- END OF STATUS CHECK AND SKIP BLOCK ---
+
+
+            # --- Main Processing Block (Only runs if skip is False) ---
             try:
-                # Update Status to PROCESSING (if not reprocessing)
-                if not clone_ok:
-                    current_sheet_status = f"PROCESSING_{store_val.upper()}"
-                    try: google_sheets_utils.update_export_status_for_store(original_pid, store_val, current_sheet_status, "", "", STATUS_SHEET_NAME)
-                    except Exception as sheet_err: logger.error(f"{log_prefix} Failed initial status update: {sheet_err}")
+                # Update Status to PROCESSING
+                if not clone_ok: # Only set processing if not retrying an error that kept clone_ok=True
+                    update_status_to = f"PROCESSING_{store_val.upper()}"
+                    try:
+                        logger.info(f"{log_prefix} Setting status to '{update_status_to}'...")
+                        update_success = google_sheets_utils.update_export_status_for_store(original_pid, store_val, update_status_to, None, None, STATUS_SHEET_NAME)
+                        if update_success: current_sheet_status = update_status_to
+                        else: logger.error(f"{log_prefix} Failed initial status update to PROCESSING. Skipping product/store."); continue
+                    except Exception as sheet_err: logger.error(f"{log_prefix} Exception during status update to PROCESSING: {sheet_err}"); continue
 
                 # --- Clone Product (if needed) ---
                 if not clone_ok:
-                    # Calls the _attempt_single_product_clone defined LOCALLY
+                    logger.info(f"{log_prefix} Attempting clone...")
                     clone_result = _attempt_single_product_clone(original_pid, store_config)
                     if clone_result and clone_result.get("_success"):
-                        cloned_gid = clone_result.get("admin_graphql_api_id"); cloned_title = clone_result.get("title"); clone_ok = True; ok_clones += 1;
-                        # Status already updated inside _attempt_single_product_clone
-                        current_sheet_status = f"CLONED_{store_val.upper()}" # Track status locally
-                        logger.info(f"{log_prefix} Clone step successful.")
-                    else:
-                        clone_ok = False; fail_clones += 1; logger.info(f"{log_prefix} Clone step failed or skipped."); continue # Skip translation
+                        cloned_gid = clone_result.get("admin_graphql_api_id"); cloned_title = clone_result.get("title"); clone_ok = True; ok_clones += 1; current_sheet_status = f"CLONED_{store_val.upper()}"; logger.info(f"{log_prefix} Clone successful.")
+                    else: fail_clones += 1; logger.error(f"{log_prefix} Clone failed."); continue; # Skip translation
 
-                # --- Translate Product (if clone ok) ---
-                if not cloned_gid: logger.error(f"{log_prefix} Cannot translate, GID missing."); continue
+                # --- Translate Product ---
+                if not cloned_gid: logger.error(f"{log_prefix} Cannot translate, GID missing."); continue;
 
                 logger.info(f"{log_prefix} Translating GID: {cloned_gid}...")
-                methods = {"title": "deepseek", "description": "deepseek", "variants": "google"} # Example methods
+                methods = {"title": "deepseek", "description": "deepseek", "variants": "google"}
                 try:
-                    # Calls translate_cloned_product defined LOCALLY
+                    # FIX FOR POINT 2: Set Source Language
                     trans_ok = translate_cloned_product(
                         product_gid=cloned_gid, target_store_url=store_url, target_api_key=store_key,
-                        target_language=store_lang, translation_methods=methods, source_language="auto"
+                        target_language=store_lang, translation_methods=methods,
+                        source_language="de" # <<< SET YOUR ACTUAL SOURCE LANGUAGE HERE
                     )
-                except Exception as trans_err: # Catch errors from the orchestration function
-                    logger.exception(f"{log_prefix} ❌ Error calling translate_cloned_product: {trans_err}"); trans_ok = False
+                except Exception as trans_err: logger.exception(f"{log_prefix} ❌ Error calling translate_cloned_product: {trans_err}"); trans_ok = False;
 
-                # Update status based on translation result
-                # Update status based on translation result
-                if trans_ok is True: # Use 'is True' for explicit boolean check
-                    success_translations += 1
-                    logger.info(f"{log_prefix} ✅ Translation orchestration successful.")
-                    # SET STATUS TO DONE ON SUCCESS
-                    current_sheet_status = f"DONE_{store_val.upper()}"
-                else: # This block runs only if trans_ok is False or None
-                    failed_translations += 1
-                    # Set status to ERROR only on failure
-                    # Keep existing ERROR status if it was already set before translation attempt
-                    if not current_sheet_status.startswith("ERROR_"):
-                         current_sheet_status = f"ERROR_TRANSLATING_{store_val.upper()}"
-                    logger.error(f"{log_prefix} ❌ Translation orchestration failed (Final Status set to: {current_sheet_status}).")
+                if trans_ok: success_translations += 1; logger.info(f"{log_prefix} ✅ Translation successful."); current_sheet_status = f"DONE_{store_val.upper()}";
+                else: failed_translations += 1; 
+                if not current_sheet_status.startswith("ERROR_"): current_sheet_status = f"ERROR_TRANSLATING_{store_val.upper()}"; logger.error(f"{log_prefix} ❌ Translation failed (Status: {current_sheet_status}).");
 
-                # Final sheet update uses the status determined correctly above
-                # Uses google_sheets_utils
+                # Final sheet update
                 logger.info(f"{log_prefix} Updating sheet with final status '{current_sheet_status}'...")
-                google_sheets_utils.update_export_status_for_store(
-                    original_pid, store_val, current_sheet_status, cloned_gid, cloned_title, STATUS_SHEET_NAME
-                )
-            except Exception as processing_err: # Catch errors in main try block for product
-                logger.error(f"{log_prefix} ‼️ UNEXPECTED ERROR: {processing_err}", exc_info=True)
-                if not clone_ok: fail_clones += 1;
-                else: fail_trans += 1;
-                current_sheet_status = f"ERROR_EXCEPTION_{store_val.upper()}"
-                try: google_sheets_utils.update_export_status_for_store(original_pid, store_val, current_sheet_status, cloned_gid, cloned_title, STATUS_SHEET_NAME)
-                except Exception as log_err: logger.error(f"{log_prefix} Failed log EXCEPTION status: {log_err}")
+                google_sheets_utils.update_export_status_for_store(original_pid, store_val, current_sheet_status, cloned_gid, cloned_title, STATUS_SHEET_NAME)
 
-            # --- Delay ---
-            time.sleep(random.uniform(1.0, 2.5))
+            except Exception as processing_err:
+                logger.error(f"{log_prefix} ‼️ UNEXPECTED ERROR processing: {processing_err}", exc_info=True);
+                if not clone_ok: fail_clones += 1; 
+                else: failed_translations += 1;
+                current_sheet_status = f"ERROR_EXCEPTION_{store_val.upper()}";
+                try: google_sheets_utils.update_export_status_for_store(original_pid, store_val, current_sheet_status, cloned_gid, cloned_title, STATUS_SHEET_NAME);
+                except Exception as log_err: logger.error(f"{log_prefix} Failed log EXCEPTION status: {log_err}");
+
+            # --- Rate Limiting Delay ---
+            sleep_duration = random.uniform(0.5, 1.5) # Adjust if needed
+            logger.debug(f"{log_prefix} Iteration complete. Sleeping for {sleep_duration:.2f}s...")
+            time.sleep(sleep_duration)
+            # --- End Delay ---
 
         logger.info(f"--- Finished Store: {store_val} ---")
 
     # --- Final Summary ---
-    end_time = time.time(); duration = end_time - start_time; logger.info("="*40); logger.info("--- Weekly Script Complete ---"); logger.info(f" Duration: {duration:.2f}s"); logger.info(f" Attempts: {proc_count}"); logger.info(f" Clones OK: {ok_clones} | Fail: {fail_clones}"); logger.info(f" Translations OK: {ok_trans} | Fail: {fail_trans}"); logger.info("="*40);
+    end_time = time.time(); duration = end_time - start_time
+    logger.info("="*40)
+    logger.info("--- Weekly Script Complete ---")
+    logger.info(f" Duration: {duration:.2f}s")
+    logger.info(f" Product/Store Attempts: {proc_count}")
+    logger.info(f" Clones OK: {ok_clones} | Fail: {fail_clones}")
+    logger.info(f" Translations OK: {success_translations} | Fail: {failed_translations}")
+    logger.info("="*40)
 
 
 # --- Script Execution Guard ---
 if __name__ == "__main__":
-    try: main()
-    except Exception as main_err: logger.critical(f"💥 MAIN EXECUTION FAILED: {main_err}", exc_info=True); sys.exit(1);
+    try:
+        main()
+    except Exception as main_err:
+        logger.critical(f"💥 MAIN EXECUTION FAILED UNHANDLED: {main_err}", exc_info=True)
+        sys.exit(1)
