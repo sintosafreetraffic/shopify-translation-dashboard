@@ -547,7 +547,7 @@ def main():
             if original_pid in sheet1_data_map and sheet1_header:
                 row = sheet1_data_map[original_pid]; suffix = store_val.split('_')[-1].upper(); status_col = f"Status {suffix}"; gid_col = f"Cloned GID {suffix}"; title_col = f"Cloned Title {suffix}";
                 if status_col in row:
-                    status = str(row.get(status_col, "")).strip().upper(); done_statuses = {f"DONE_{suffix}", "APPROVED", "TRANSLATED"}; retry_errors = {"ERROR_TRANSLATING", "ERROR_VARIANT_TRANSLATION", "ERROR_MISSING_GID"};
+                    status = str(row.get(status_col, "")).strip().upper(); done_statuses = {f"DONE_{store_val.upper()}", "APPROVED", "TRANSLATED"}; retry_errors = {"ERROR_TRANSLATING", "ERROR_VARIANT_TRANSLATION", "ERROR_MISSING_GID"};
                     if status in done_statuses: logger.info(f"{log_prefix} Skip: Done status '{status}'."); skip = True;
                     elif status.startswith("ERROR_") and status not in retry_errors: logger.info(f"{log_prefix} Skip: Non-retryable error '{status}'."); skip = True;
                     elif status.startswith("ERROR_") and status in retry_errors:
