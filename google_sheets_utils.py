@@ -41,6 +41,13 @@ STORE_COLUMN_MAP = {
 _gspread_client = None
 _client_lock = Lock()
 
+# At the top of your google_sheets_utils.py
+STORE_COLUMN_MAP = {
+    "store_es": {"status": 4, "gid": 5, "title": 6},  # Example: Status in D, GID in E, Title in F
+    "store_dk": {"status": 7, "gid": 8, "title": 9},  # Example: Status in G, GID in H, Title in I
+    # Add other stores from your SHOPIFY_STORES_CONFIG
+}
+
 def clean_header_key(header: str) -> str:
     """Removes leading/trailing spaces and normalizes internal whitespace."""
     if not isinstance(header, str):
@@ -312,9 +319,14 @@ def find_row_index_by_id(sheet: gspread.Worksheet, product_id: Union[str, int], 
          logger.error(f"Error finding row for ID {product_id} in col {id_column_index}: {e}")
          return None
 
-def update_export_status_for_store(original_product_id: Union[str, int], target_store_value: str,
-                                   new_status: str, cloned_gid: Optional[str], cloned_title: Optional[str],
-                                   sheet_name: str = SHEET1_NAME) -> bool:
+def update_export_status_for_store(
+    original_product_id: Union[str, int], 
+    target_store_value: str, # This should be the store key like "store_es"
+    status_value: str,       # Parameter name is now status_value
+    cloned_gid: Optional[str], 
+    cloned_title: Optional[str],
+    sheet_name: str = SHEET1_NAME 
+) -> bool:
     """
     Updates Status, GID, and Title using column INDICES defined in STORE_COLUMN_MAP.
     Converts indices to letters before creating A1 range notation for update.
@@ -324,7 +336,10 @@ def update_export_status_for_store(original_product_id: Union[str, int], target_
         logger.warning("⚠️ update_export_status_for_store: Missing product_id or target_store_value.")
         return False
 
-    # --- Determine target column INDICES from map ---
+    if 'STORE_COLUMN_MAP' not in globals() or not isinstance(STORE_COLUMN_MAP, dict) or not STORE_COLUMN_MAP:
+        logger.error("❌ STORE_COLUMN_MAP is not defined, not a dictionary, or is empty in google_sheets_utils.")
+        return False
+        
     column_set = STORE_COLUMN_MAP.get(target_store_value)
     if not column_set:
         logger.error(f"❌ No column mapping found for target store '{target_store_value}' in STORE_COLUMN_MAP.")
@@ -334,65 +349,58 @@ def update_export_status_for_store(original_product_id: Union[str, int], target_
     gid_col_idx = column_set.get('gid')
     title_col_idx = column_set.get('title')
 
-    # --- Validate that indices are positive integers ---
-    # (Assuming 1-based indexing in your map)
-    if not isinstance(status_col_idx, int) or not isinstance(gid_col_idx, int) or not isinstance(title_col_idx, int) or \
-       status_col_idx <= 0 or gid_col_idx <= 0 or title_col_idx <= 0:
-         logger.error(f"❌ Invalid non-positive integer column index found for store '{target_store_value}' in STORE_COLUMN_MAP. Found: {column_set}")
+    if not (isinstance(status_col_idx, int) and status_col_idx > 0 and
+            isinstance(gid_col_idx, int) and gid_col_idx > 0 and
+            isinstance(title_col_idx, int) and title_col_idx > 0):
+         logger.error(f"❌ Invalid column index in STORE_COLUMN_MAP for '{target_store_value}'. Found: {column_set}")
          return False
-    # --- End column index determination ---
 
     log_title_snip = str(cloned_title)[:50] + '...' if cloned_title else '(empty)'
-    # Log the column indices being used
+    # Corrected to use status_value in the log message
     logger.info(f"Sheet Update Prep for Orig ID {original_product_id_str} / Store '{target_store_value}': "+
-                f"Status='{new_status}'(ColIdx:{status_col_idx}), GID='{cloned_gid or ''}'(ColIdx:{gid_col_idx}), Title='{log_title_snip}'(ColIdx:{title_col_idx})")
+                f"Status='{status_value}'(ColIdx:{status_col_idx}), GID='{cloned_gid or ''}'(ColIdx:{gid_col_idx}), Title='{log_title_snip}'(ColIdx:{title_col_idx})")
 
     try:
         sheet = _get_worksheet(sheet_name)
-        if not sheet: return False
-
-        logger.debug(f"Finding row for Product ID '{original_product_id_str}'...")
-        # find_row_index_by_id returns 1-based row number
-        row_index = find_row_index_by_id(sheet, original_product_id_str, id_column_index=1) # Assumes Product ID is Col 1 (A)
-
-        logger.info(f"[DEBUG Update] Found row_index: {row_index} (Type: {type(row_index)}) for PID {original_product_id_str}")
+        if not sheet: 
+            logger.error(f"Failed to get worksheet: {sheet_name}")
+            return False
+        
+        id_column_index_for_find = 1 # Defaulting to column A for Product ID lookup
+        
+        row_index = find_row_index_by_id(sheet, original_product_id_str, id_column_index=id_column_index_for_find) 
 
         if row_index and isinstance(row_index, int) and row_index > 0:
-            # --- Convert column INDICES to LETTERS ---
             try:
-                # get_column_letter expects 1-based index
-                status_col_letter = get_column_letter(status_col_idx) # e.g., 4 -> 'D'
-                gid_col_letter = get_column_letter(gid_col_idx)       # e.g., 5 -> 'E'
-                title_col_letter = get_column_letter(title_col_idx)     # e.g., 6 -> 'F'
+                status_col_letter = get_column_letter(status_col_idx)
+                gid_col_letter = get_column_letter(gid_col_idx)
+                title_col_letter = get_column_letter(title_col_idx)
             except Exception as conversion_err:
-                 logger.error(f"❌ Failed to convert column indices ({status_col_idx},{gid_col_idx},{title_col_idx}) to letters: {conversion_err}")
+                 logger.error(f"❌ Failed to convert column indices to letters: {conversion_err}")
                  return False
-            # --- End Conversion ---
 
-            # Construct ranges using LETTERS and row index
-            status_range = f"{status_col_letter}{row_index}" # e.g., D109
-            gid_range = f"{gid_col_letter}{row_index}"       # e.g., E109
-            title_range = f"{title_col_letter}{row_index}"     # e.g., F109
+            status_range = f"{status_col_letter}{row_index}"
+            gid_range = f"{gid_col_letter}{row_index}"
+            title_range = f"{title_col_letter}{row_index}"
 
-            logger.info(f"[DEBUG Update] Calculated ranges: Status='{status_range}', GID='{gid_range}', Title='{title_range}'")
+            logger.debug(f"Calculated ranges: Status='{status_range}', GID='{gid_range}', Title='{title_range}'")
 
+            # Corrected to use status_value when preparing update data
             update_data = [
-                {"range": status_range, "values": [[str(new_status or '')]]},
+                {"range": status_range, "values": [[str(status_value or '')]]},
                 {"range": gid_range,    "values": [[str(cloned_gid or '')]]},
                 {"range": title_range,  "values": [[str(cloned_title or '')]]}
             ]
-            logger.debug(f"Attempting batch update for row {row_index}...")
+            logger.debug(f"Attempting batch update for row {row_index} with data: {update_data}")
             _retry_gspread_operation(sheet.batch_update, update_data, value_input_option="USER_ENTERED")
             logger.info(f"✅ Updated Sheet Row {row_index} for Store '{target_store_value}'.")
             return True
         else:
-            logger.warning(f"⚠️ Could not find valid row index ({row_index}) for original product_id={original_product_id_str} in '{sheet_name}' Col A during update attempt.")
+            logger.warning(f"⚠️ Could not find valid row index for Product ID '{original_product_id_str}' in '{sheet_name}' (Col {id_column_index_for_find}).")
             return False
     except Exception as e:
         logger.exception(f"❌ Error in update_export_status_for_store for ID {original_product_id_str} / Store '{target_store_value}': {e}")
         return False
-
-# Add this function definition inside google_sheets_utils.py
 
 # In google_sheets_utils.py
 # Replace the existing get_sheet_data_by_header function with this:
