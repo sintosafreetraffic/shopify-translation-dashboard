@@ -900,4 +900,31 @@ def extract_name_from_title(title: str) -> str:
         return title.split("|")[0].strip()
     return title.strip()
 
+def add_product_to_collection(product_id: int, collection_id: int, session: dict) -> bool:
+    """
+    Adds a product to a manual (custom) collection via Shopify's Collects API.
+    session = {'store_url': 'store.myshopify.com', 'access_token': 'X'}
+    """
+    url = f"https://{session['store_url']}/admin/api/2024-04/collects.json"
+    headers = {
+        "X-Shopify-Access-Token": session["access_token"],
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "collect": {
+            "product_id": int(product_id),
+            "collection_id": int(collection_id)
+        }
+    }
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=15)
+        if resp.status_code == 201:
+            logging.info(f"✅ Successfully added product {product_id} to collection {collection_id}.")
+            return True
+        else:
+            logging.error(f"❌ Failed to add to collection: {resp.status_code} {resp.text}")
+            return False
+    except Exception as e:
+        logging.error(f"❌ Exception in add_product_to_collection: {e}")
+        return False
  
