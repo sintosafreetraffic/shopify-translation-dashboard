@@ -30,7 +30,12 @@ import shopify_utils
 import google_sheets_utils
 import variants_utils2
 
-
+from variants_utils2 import (
+    get_product_option_values,
+    update_product_option_values,
+    clean_translated_text,
+    get_predefined_translation
+)
 
 # ------------------------------ #
 # slugify
@@ -718,15 +723,15 @@ def main():
     sheet_data_map = {str(r.get(DEFAULT_PID_COLUMN_HEADER, "")).strip(): r for r in sheet_data if r.get(DEFAULT_PID_COLUMN_HEADER, "")}
 
     # 5. Process/Export/Translate for Each Target Store
-    for store in config["TARGET_STORES"]:
-        store_name = store["value"]
-        target_url = store["shopify_store_url"]
-        target_api_key = store["shopify_api_key"]
-        target_lang = store["language"]
-        gid_col = store["sheet_gid_col_header"]
-        status_col = store["sheet_status_col_header"]
+    for pid, row in sheet_data_map.items():
+        for store in config["TARGET_STORES"]:
+            store_name = store["value"]
+            target_url = store["shopify_store_url"]
+            target_api_key = store["shopify_api_key"]
+            target_lang = store["language"]
+            gid_col = store["sheet_gid_col_header"]
+            status_col = store["sheet_status_col_header"]
 
-        for pid, row in sheet_data_map.items():
             current_status = str(row.get(status_col, "")).upper()
             if current_status.startswith("DONE") or current_status in ("APPROVED",):
                 continue
@@ -865,13 +870,24 @@ def main():
 
             # Variants/Options (Google Translate via variants_utils)
             try:
-                variants_and_options = variants_utils2.update_product_option_values(
-                    product=target_product,
-                    source_language=config["SOURCE_CONTENT_LANGUAGE"],
-                    target_language=target_lang,
-                    method=translation_methods["variants"]
-                )
-                logger.info(f"[{pid}] Translated variants/options: {variants_and_options}")
+                options = target_product.get('options', [])
+                all_translated_options = []
+                for option in options:
+                    translated_option = variants_utils2.update_product_option_values(
+                        product_gid=target_product["id"],
+                        option=option,
+                        target_language=target_lang,
+                        source_language=config["SOURCE_CONTENT_LANGUAGE"],
+                        translation_method=translation_methods["variants"],
+                        shopify_store_url=target_url,
+                        shopify_api_key=target_api_key
+                    )
+                    all_translated_options.append(translated_option)
+                logger.info(f"[{pid}] Translated variants/options: {all_translated_options}")
+
+                # Assign to the variable used below!
+                variants_and_options = all_translated_options if all_translated_options else None
+
             except Exception as e:
                 logger.error(f"[{pid}] Variant/option translation failed: {e}")
                 variants_and_options = None
@@ -893,19 +909,33 @@ def main():
             time.sleep(2)
 
             # Now update variants/options if possible
-            if variants_and_options:
-                try:
-                    variants_utils2.update_variants_and_options_on_store(
-                        product_id=numeric_cloned_id,
-                        variants_and_options=variants_and_options,
-                        api_key=target_api_key,
-                        store_url=target_url
-                    )
-                    logger.info(f"[{pid}] Updated variants/options on store.")
-                except Exception as e:
-                    logger.error(f"[{pid}] Failed to update variants/options on store: {e}")
-
-            time.sleep(2)        
+            # --- TRANSLATE & UPDATE VARIANT OPTIONS (robust logic from variants_utils2) ---
+            try:
+                options = variants_utils2.get_product_option_values(
+                    product_gid=cloned_gid,        # GID for the cloned product
+                    shopify_store_url=target_url,
+                    shopify_api_key=target_api_key
+                )
+                if options:
+                    for option in options:
+                        success = variants_utils2.update_product_option_values(
+                            product_gid=cloned_gid,
+                            option=option,
+                            target_language=target_lang,
+                            source_language=config["SOURCE_CONTENT_LANGUAGE"],
+                            translation_method=translation_methods["variants"],
+                            shopify_store_url=target_url,
+                            shopify_api_key=target_api_key
+                        )
+                        if success:
+                            logger.info(f"[{pid}] ✅ Option updated: {option['name']} on product {cloned_gid}")
+                        else:
+                            logger.error(f"[{pid}] ❌ Option update failed: {option['name']} on product {cloned_gid}")
+                    time.sleep(2)
+                else:
+                    logger.warning(f"[{pid}] No options found for product {cloned_gid} in {store_name} (nothing to update)")
+            except Exception as e:
+                logger.error(f"[{pid}] Exception during option translation/update: {e}")
 
             if update_success:
                 google_sheets_utils.update_export_status_for_store(
@@ -913,6 +943,24 @@ def main():
                     cloned_gid=cloned_gid, cloned_title=translated_title, sheet_name=status_sheet
                 )
                 logger.info(f"[{pid}] DONE for {store_name}.")
+
+                collection_id = store.get("pinterest_collection_rest_id")
+                if collection_id:
+                    session = {
+                        "store_url": target_url,
+                        "access_token": target_api_key,
+                    }
+                    added = shopify_utils.add_product_to_collection(
+                        product_id=int(numeric_cloned_id),  # Must be int, not GID string
+                        collection_id=int(collection_id),
+                        session=session
+                    )
+                    if added:
+                        logger.info(f"[{pid}] ✅ Added to collection {collection_id} in {store_name}")
+                    else:
+                        logger.warning(f"[{pid}] ❌ Failed to add to collection {collection_id} in {store_name}")
+                else:
+                    logger.warning(f"[{pid}] No collection_id found in config for {store_name}")
             else:
                 google_sheets_utils.update_export_status_for_store(
                     original_product_id=pid, target_store_value=store_name, status_value="ERROR_TRANSLATING",
@@ -922,7 +970,6 @@ def main():
 
             # --- Optional: Delay for rate-limiting
             time.sleep(float(os.getenv("DELAY_BETWEEN_PRODUCTS", "1.0")))
-
 
 if __name__ == "__main__":
     try:
