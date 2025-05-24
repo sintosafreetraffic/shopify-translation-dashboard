@@ -393,8 +393,9 @@ def _get_localized_labels(target_lang):
         'ru': {'advantages': 'Преимущества товара', 'cta': 'Купить сейчас!'},
         'ja': {'advantages': '製品の特長', 'cta': '今すぐ購入！'},
         'zh': {'advantages': '产品优势', 'cta': '立即购买！'},
+        'da': {'advantages': 'Produktfordele', 'cta': 'Køb nu!'},   # <-- Danish
     }
-    return localized_map.get(target_lang.lower(), localized_map['en'])
+    return localized_map.get(target_lang, localized_map['en'])
 
 
 def _build_bullet_points(features):
@@ -416,7 +417,6 @@ def _build_bullet_points(features):
         else:
             bullet_li_list.append(f"<li>{line.strip()}</li>")
     return "\n".join(bullet_li_list)
-
 
 def post_process_description(original_html, new_html, method, product_data=None, target_lang='en', final_product_title=None, product_name=None):
     """
@@ -771,6 +771,39 @@ def main():
                             cloned_gid=cloned_gid, cloned_title=source_product["title"], sheet_name=status_sheet
                         )
                         continue  # Do NOT continue to translation/update!
+
+                    # ----------- PRICE MULTIPLIER LOGIC -----------
+                    price_multiplier = float(store.get("price_multiplier", 1.0))
+
+                    if price_multiplier != 1.0:
+                        try:
+                            for variant in target_product.get("variants", []):
+                                old_price = float(variant["price"])
+                                new_price = old_price * price_multiplier  # Do not round here!
+                                variant_id = variant["id"]
+
+                                update_variant_payload = {
+                                    "variant": {
+                                        "id": variant_id,
+                                        "price": new_price
+                                        # No need to add compare_at_price here: your helper does it!
+                                    }
+                                }
+
+                                resp = shopify_utils.update_variant(
+                                    store_url=target_url,
+                                    api_key=target_api_key,
+                                    payload=update_variant_payload,
+                                    apply_smart_round=True,         # Use smart rounding (default: True)
+                                    double_compare_price=True,      # Set compare_at_price = 2x price (default: True)
+                                    compare_at_integer=True         # Compare at price as integer (default: True)
+                                )
+                                logger.info(
+                                    f"[{pid}] Updated variant {variant_id} price: {old_price} -> {resp.get('variant', {}).get('price')}, compare_at_price: {resp.get('variant', {}).get('compare_at_price')}"
+                                )
+                        except Exception as e:
+                            logger.error(f"[{pid}] Failed to update variant prices: {e}")
+
 
                     # Only if found, update sheet as CLONED:
                     google_sheets_utils.update_export_status_for_store(

@@ -927,4 +927,67 @@ def add_product_to_collection(product_id: int, collection_id: int, session: dict
     except Exception as e:
         logging.error(f"❌ Exception in add_product_to_collection: {e}")
         return False
- 
+        
+def smart_round(price):
+    """
+    Rounds the price up to common psychological price points (24.99, 49.99, ...), otherwise next multiple of 25 minus 0.01.
+    """
+    intervals = [24.99, 49.99, 74.99, 99.99, 124.99, 149.99, 174.99, 199.99, 224.99, 249.99]
+    for val in intervals:
+        if price <= val:
+            return val
+    return (int(price // 25) * 25 + 24.99)
+
+def update_variant(
+    store_url: str,
+    api_key: str,
+    payload: dict,
+    api_version: str = "2024-04",
+    apply_smart_round: bool = True,
+    double_compare_price: bool = True,
+    compare_at_integer: bool = True
+) -> dict:
+    """
+    Updates a single Shopify product variant (e.g., to change price) via REST API.
+    If apply_smart_round is True, price is rounded up to common values.
+    If double_compare_price and compare_at_integer are True, sets compare_at_price as a pure integer (e.g., 199 -> 400).
+    """
+    print("USING UPDATED update_variant FUNCTION!")
+    variant = payload.get("variant", {})
+    variant_id = variant.get("id")
+    if not variant_id:
+        logger.error("update_variant: No variant ID in payload")
+        return {"error": "Missing variant ID"}
+
+    # Price logic
+    price = float(variant.get("price"))
+    if apply_smart_round:
+        price = smart_round(price)
+        payload["variant"]["price"] = price
+
+    # Set compare_at_price
+    if double_compare_price:
+        if compare_at_integer:
+            compare_at_price = int(round(price * 2, 0))  # e.g. 199 -> 398, 199.99 -> 400
+            # Always round up to the next full 100 if you want 199 -> 400, 149 -> 300
+            # Use math.ceil if you want that effect:
+            # import math
+            # compare_at_price = int(math.ceil(price * 2 / 100.0)) * 100
+        else:
+            compare_at_price = price * 2  # Not rounded to integer
+
+        payload["variant"]["compare_at_price"] = compare_at_price
+
+    endpoint = f"https://{store_url.replace('https://','').replace('http://','')}/admin/api/{api_version}/variants/{variant_id}.json"
+    headers = {
+        "X-Shopify-Access-Token": api_key,
+        "Content-Type": "application/json"
+    }
+    try:
+        resp = requests.put(endpoint, headers=headers, json=payload, timeout=15)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        logger.error(f"update_variant failed: {e} | Response: {getattr(e, 'response', None)}")
+        return {"error": str(e)}
+
