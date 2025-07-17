@@ -366,14 +366,43 @@ def assign_product_type(product_id, product_type):
         logger.error(f"Error: Product type '{product_type}' is not in the allowed list for product '{product_id}'.")
         return False
 
-def move_product_to_pinterest_collection(product_id):
-    """ Adds a product to the predefined 'READY FOR PINTEREST' collection. """
-    if not TARGET_COLLECTION_ID: # Check if target ID is validly configured
-         logger.error(f"TARGET_COLLECTION_ID ({TARGET_COLLECTION_ID}) is not configured correctly. Cannot move product {product_id}.")
-         return False
+def move_product_to_pinterest_collection(product_id, from_collection_id=None):
+    """
+    Adds a product to the predefined 'READY FOR PINTEREST' collection.
+    Optionally removes it from a source collection if from_collection_id is provided.
+
+    Args:
+        product_id (int or str): Shopify product ID
+        from_collection_id (int or str, optional): The collection ID to remove from (if moving)
+
+    Returns:
+        bool: True if added to Pinterest collection (even if not present in source collection).
+              False if add fails.
+    """
+    # Validate global collection info
+    if not TARGET_COLLECTION_ID:
+        logger.error(f"TARGET_COLLECTION_ID ({TARGET_COLLECTION_ID}) is not configured correctly. Cannot move product {product_id}.")
+        return False
+
     logger.info(f"Attempting to add product '{product_id}' to target collection '{TARGET_COLLECTION_NAME}' (ID: {TARGET_COLLECTION_ID})...")
-    success = platform_api_add_product_to_collection(product_id, TARGET_COLLECTION_ID) # Uses global ID
-    return success
+    success = platform_api_add_product_to_collection(product_id, TARGET_COLLECTION_ID)  # Uses global ID
+
+    if not success:
+        logger.error(f"Failed to add product {product_id} to target collection {TARGET_COLLECTION_ID}")
+        return False
+
+    # Optional: remove from previous collection if provided
+    if from_collection_id:
+        logger.info(f"Attempting to remove product '{product_id}' from source collection (ID: {from_collection_id}) after adding to target.")
+        remove_success = platform_api_remove_product_from_collection(product_id, from_collection_id)
+        if not remove_success:
+            logger.warning(f"Product {product_id} could not be removed from source collection {from_collection_id}. It may not have been present.")
+        else:
+            logger.info(f"Product {product_id} removed from source collection {from_collection_id}.")
+    else:
+        logger.debug(f"No source collection provided for removal for product {product_id}.")
+
+    return True
 
 # --- Main Execution (for running script directly) ---
 if __name__ == "__main__":
