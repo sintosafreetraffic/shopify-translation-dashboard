@@ -40,6 +40,7 @@ try:
         get_ai_type_from_description, # Import this from product_actions
         ALLOWED_PRODUCT_TYPES,        # Needed by get_ai_type_from_description
         TARGET_COLLECTION_NAME,
+        TARGET_COLLECTION_ID, 
         SOURCE_COLLECTION_ID,   # <<<--- ADD THIS IMPORT (To access the configured ID)
         SOURCE_COLLECTION_NAME,
         platform_api_remove_product_from_collection # <<<--- ADD THIS IMPORT (For logging)        # Needed by move_product_to_pinterest_collection
