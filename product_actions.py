@@ -365,117 +365,120 @@ def assign_product_type(product_id, product_type):
     else:
         logger.error(f"Error: Product type '{product_type}' is not in the allowed list for product '{product_id}'.")
         return False
-
-def move_product_to_pinterest_collection(product_id, from_collection_id=None):
+    
+def get_all_product_ids_from_collection(collection_id, limit=250):
     """
-    Adds a product to the predefined 'READY FOR PINTEREST' collection.
-    Optionally removes it from a source collection if from_collection_id is provided.
+    Fetch all product IDs from a manual (custom) collection via the Collects API.
+    Handles Shopify's pagination (cursor-based).
+    Returns a list of product IDs.
+    """
+    if not collection_id:
+        logger.error("Collection ID is None, cannot fetch products.")
+        return []
+    product_ids = []
+    page_info = None
+    page = 1
+    while True:
+        endpoint = f"/collects.json?collection_id={collection_id}&fields=product_id&limit={limit}"
+        if page_info:
+            endpoint += f"&page_info={page_info}"
+        logger.debug(f"[DEBUG] Requesting endpoint: {endpoint}")
+        response = shopify_request("GET", endpoint)
+        if not response or response.status_code != 200:
+            logger.error(f"No response for collection {collection_id}. Check API credentials and URL.")
+            break
+        data = response.json()
+        collects = data.get("collects", [])
+        ids_this_page = [c["product_id"] for c in collects if "product_id" in c]
+        product_ids.extend(ids_this_page)
+        logger.info(f"Page {page}: Fetched {len(ids_this_page)} products.")
+        # Shopify pagination: look for 'Link' header with 'rel="next"'
+        link_header = response.headers.get("Link")
+        if not link_header or 'rel="next"' not in link_header:
+            break
+        # Extract the next page_info
+        import re
+        match = re.search(r'<[^>]*page_info=([^&>]+)[^>]*>; rel="next"', link_header)
+        if match:
+            page_info = match.group(1)
+            page += 1
+        else:
+            break
+    logger.info(f"Total fetched: {len(product_ids)} unique product IDs from collection {collection_id}.")
+    return list(set(product_ids))
+
+
+def move_product_to_pinterest_collection(product_id, from_collection_id=None, target_collection_id=None, target_collection_name=None):
+    """
+    Moves a product to the target Pinterest collection and removes it from the source collection (if provided).
 
     Args:
-        product_id (int or str): Shopify product ID
-        from_collection_id (int or str, optional): The collection ID to remove from (if moving)
-
+        product_id (int or str): The Shopify product ID.
+        from_collection_id (int or str, optional): The source collection to remove from (if any).
+        target_collection_id (int or str, optional): The target Pinterest collection ID (defaults to global).
+        target_collection_name (str, optional): The name of the Pinterest collection (for logs).
     Returns:
-        bool: True if added to Pinterest collection (even if not present in source collection).
-              False if add fails.
+        bool: True if add+remove succeeded (or add succeeded, even if not present in source), False if add fails.
     """
-    # Validate global collection info
-    if not TARGET_COLLECTION_ID:
-        logger.error(f"TARGET_COLLECTION_ID ({TARGET_COLLECTION_ID}) is not configured correctly. Cannot move product {product_id}.")
+    # Use provided target, or fallback to globals
+    target_collection_id = target_collection_id or TARGET_COLLECTION_ID
+    target_collection_name = target_collection_name or TARGET_COLLECTION_NAME
+
+    if not target_collection_id:
+        logger.error(f"TARGET_COLLECTION_ID is not set. Cannot move product {product_id}.")
         return False
 
-    logger.info(f"Attempting to add product '{product_id}' to target collection '{TARGET_COLLECTION_NAME}' (ID: {TARGET_COLLECTION_ID})...")
-    success = platform_api_add_product_to_collection(product_id, TARGET_COLLECTION_ID)  # Uses global ID
-
-    if not success:
-        logger.error(f"Failed to add product {product_id} to target collection {TARGET_COLLECTION_ID}")
+    # Add to target collection
+    logger.info(f"Adding product '{product_id}' to '{target_collection_name}' (ID: {target_collection_id})...")
+    added = platform_api_add_product_to_collection(product_id, target_collection_id)
+    if not added:
+        logger.error(f"Failed to add product {product_id} to collection {target_collection_id}")
         return False
 
-    # Optional: remove from previous collection if provided
+    # Optionally remove from source collection
     if from_collection_id:
-        logger.info(f"Attempting to remove product '{product_id}' from source collection (ID: {from_collection_id}) after adding to target.")
-        remove_success = platform_api_remove_product_from_collection(product_id, from_collection_id)
-        if not remove_success:
-            logger.warning(f"Product {product_id} could not be removed from source collection {from_collection_id}. It may not have been present.")
+        logger.info(f"Removing product '{product_id}' from source collection (ID: {from_collection_id}) after add...")
+        removed = platform_api_remove_product_from_collection(product_id, from_collection_id)
+        if removed:
+            logger.info(f"Product {product_id} removed from source collection {from_collection_id}")
         else:
-            logger.info(f"Product {product_id} removed from source collection {from_collection_id}.")
+            logger.warning(f"Product {product_id} could not be removed from source {from_collection_id} (may not have been present).")
     else:
         logger.debug(f"No source collection provided for removal for product {product_id}.")
 
     return True
 
-# --- Main Execution (for running script directly) ---
+
 if __name__ == "__main__":
-    logger.info("--- Product Action Script (Direct Execution) ---")
+    # You can override with test IDs here, or use .env globals
 
-    # --- Argument Parsing ---
-    parser = argparse.ArgumentParser(description="Update Shopify product type and manage collections.")
-    parser.add_argument("product_id", help="The ID of the Shopify product to process.")
-    parser.add_argument("product_type", help="The desired product type (must be in the allowed list).")
-    parser.add_argument("--skip-move", action="store_true", help="Only assign product type, do not move/remove from collections.")
-    args = parser.parse_args()
-    target_product_id = args.product_id
-    chosen_product_type = args.product_type
-    skip_move = args.skip_move
+    TEST_SOURCE_COLLECTION_ID = 640471302468    # <--- replace with your test source
+    TEST_TARGET_COLLECTION_ID = 642374697284   # <--- replace with your test target
+    logger.info(f"TEST MODE: Moving all products from collection {TEST_SOURCE_COLLECTION_ID} ➔ {TEST_TARGET_COLLECTION_ID}")
 
-    # --- Basic validation for product ID ---
-    try:
-        int(target_product_id)
-    except ValueError:
-         logger.error(f"Invalid Product ID provided: '{target_product_id}'. It must be a number.")
-         exit(1)
+    product_ids = get_all_product_ids_from_collection(TEST_SOURCE_COLLECTION_ID)
+    logger.info(f"Found {len(product_ids)} product(s) to move from source collection.")
 
-    # --- Check Environment Variables (Globally loaded, just verify presence) ---
-    if not SHOPIFY_STORE_URL or not SHOPIFY_API_ACCESS_TOKEN:
-        logger.critical("Essential Shopify environment variables missing (URL or Token). Please check .env.")
-        exit(1)
-    if not TARGET_COLLECTION_ID: # Check the processed global variable
-         logger.critical("TARGET_COLLECTION_ID missing or invalid in .env. Cannot proceed.")
-         exit(1)
-    # Warn if SOURCE_COLLECTION_ID is needed but missing for direct run removal
-    if not skip_move and not SOURCE_COLLECTION_ID:
-         logger.warning("⚠️ SOURCE_COLLECTION_ID missing or invalid in .env. Removal from source will be skipped.")
-
-    logger.info(f"Configured for store: {SHOPIFY_STORE_URL}")
-    logger.info(f"Using target collection: '{TARGET_COLLECTION_NAME}' (ID: {TARGET_COLLECTION_ID})")
-    if SOURCE_COLLECTION_ID:
-        logger.info(f"Using source collection for removal: '{SOURCE_COLLECTION_NAME}' (ID: {SOURCE_COLLECTION_ID}).")
-
-
-    # --- Process the Product ---
-    logger.info(f"\n--- Processing Product ID: {target_product_id} ---")
-    logger.info(f"Attempting to assign type: '{chosen_product_type}'")
-
-    # 1. Assign Product Type
-    type_assigned = assign_product_type(target_product_id, chosen_product_type)
-
-    # 2. Move Product to Target Collection (if type assignment succeeded and not skipping)
-    moved_to_target = False
-    if type_assigned and not skip_move:
-        moved_to_target = move_product_to_pinterest_collection(target_product_id)
-    elif type_assigned and skip_move:
-         logger.info(f"Product {target_product_id} type assigned. Move/removal skipped (--skip-move flag).")
-    elif not type_assigned:
-         logger.info(f"Product {target_product_id} type assignment failed. Skipping move and removal steps.")
-
-    # 3. Remove Product from Source Collection (if moved to target succeeded and SOURCE_COLLECTION_ID is valid)
-    removed_from_source = False
-    if moved_to_target and SOURCE_COLLECTION_ID: # Use the globally defined variable
-        logger.info(f"Attempting removal from source collection '{SOURCE_COLLECTION_NAME}'...")
-        removed_from_source = platform_api_remove_product_from_collection(target_product_id, SOURCE_COLLECTION_ID) # Use global ID
-    elif moved_to_target and not SOURCE_COLLECTION_ID:
-         logger.info("Skipping removal from source collection (SOURCE_COLLECTION_ID not configured or invalid).")
-
-    # --- Final Summary Log ---
-    logger.info(f"\n--- Product {target_product_id} Processing Summary ---")
-    logger.info(f"  Type Assigned:        {type_assigned}")
-    if not skip_move:
-        logger.info(f"  Moved to Target:      {moved_to_target} ('{TARGET_COLLECTION_NAME}')")
-        if SOURCE_COLLECTION_ID:
-            logger.info(f"  Removed from Source:  {removed_from_source} ('{SOURCE_COLLECTION_NAME}')")
+    moved = 0
+    failed = 0
+    for pid in product_ids:
+        try:
+            pid_int = int(pid)
+        except Exception as e:
+            logger.error(f"Invalid product ID '{pid}', skipping. Error: {e}")
+            failed += 1
+            continue
+        # THIS is your function call, with from+to ID!
+        success = move_product_to_pinterest_collection(
+            pid_int,
+            from_collection_id=TEST_SOURCE_COLLECTION_ID,
+            target_collection_id=TEST_TARGET_COLLECTION_ID,
+            target_collection_name="TEST PINTEREST COLLECTION"
+        )
+        if success:
+            moved += 1
         else:
-            logger.info(f"  Removed from Source:  Skipped (Not Configured/Invalid ID)")
-    else:
-         logger.info("  Move/Removal Skipped (--skip-move flag used)")
+            failed += 1
 
-    logger.info("\n--- Script Finished (Direct Execution) ---")
+    logger.info(f"Move complete. Success: {moved}, Failed: {failed}.")
+
