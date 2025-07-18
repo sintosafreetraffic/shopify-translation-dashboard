@@ -2086,6 +2086,7 @@ def translate_collection_fields():
             f"Errors encountered: {error_count}."
         )
         logger.info(final_message)
+        print(final_message)
         return jsonify({
             "success": True,
             "message": final_message,
