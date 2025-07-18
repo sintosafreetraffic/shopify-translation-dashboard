@@ -2035,21 +2035,18 @@ def translate_collection_fields():
 
                         # --- Move Product to Target Collection (Conditional on Type Assignment) ---
                         if type_assigned:
-                            logger.info(f"  [{product_id}] Type assigned. Moving to collection '{TARGET_COLLECTION_NAME}' and removing from source if present...")
-                        
-                            moved_to_target = move_product_to_pinterest_collection(
-                                product_id,
-                                from_collection_id=SOURCE_COLLECTION_ID
-                            )
-                        
+                            logger.info(f"  [{product_id}] Type assigned. Attempting to move to collection '{TARGET_COLLECTION_NAME}'...")
+                            moved_to_target = move_product_to_pinterest_collection(product_id, from_collection_id=SOURCE_COLLECTION_ID)
                             if moved_to_target:
-                                logger.info(f"  [{product_id}] ✅ Moved to '{TARGET_COLLECTION_NAME}' and removed from '{SOURCE_COLLECTION_NAME}' if present.")
+                                logger.info(f"  [{product_id}] ✅ Successfully moved product to '{TARGET_COLLECTION_NAME}'.")
+                                # 3. Remove from Source Collection (ALWAYS RUN, EVEN IF NOT MOVED)
+                                removed_from_source = platform_api_remove_product_from_collection(product_id, SOURCE_COLLECTION_ID)
+                                if removed_from_source:
+                                    logger.info(f"  [{product_id}] ✅ Removed product from source collection '{SOURCE_COLLECTION_ID}'.")
+                                else:
+                                    logger.error(f"  [{product_id}] ❌ Failed to remove product from source collection '{SOURCE_COLLECTION_ID}'.")
                             else:
-                                logger.error(f"  [{product_id}] ❌ Failed to move to '{TARGET_COLLECTION_NAME}'.")
-                        
-                        else:
-                            logger.warning(f"  [{product_id}] Skipping move and removal because type assignment failed.")
-
+                                logger.error(f"  [{product_id}] ❌ Failed to move to '{TARGET_COLLECTION_NAME}'. Removal skipped.")
 
                 else: # Main product update failed
                     logger.error(f"❌ Error updating product {product_id} via REST: {update_resp.status_code} {update_resp.text}")
