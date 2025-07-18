@@ -1277,7 +1277,7 @@ def translate_test_product():
         if not product_data:
             return jsonify({"error": "Product not found"}), 404
         
-        logging.info(f"✅ Fetched product successfully: {json.dumps(product_data, indent=2)[:500]}...")
+        logging.info(f"✅ Fetched product ly: {json.dumps(product_data, indent=2)[:500]}...")
 
         updated_data = {} 
         original_title = product_data.get("title", "") # Existing line
@@ -1736,6 +1736,10 @@ def translate_collection_fields():
         processed_count = 0
         error_count = 0
         successful_updates = 0
+        successful_removals = 0
+        successful_type_assignments = 0
+        successful_moves = 0
+
 
         # --- Loop through products ---
         for idx, product_data in enumerate(products): # Use product_data consistently
@@ -2035,18 +2039,23 @@ def translate_collection_fields():
 
                         # --- Move Product to Target Collection (Conditional on Type Assignment) ---
                         if type_assigned:
+                            successful_type_assignments += 1
+                        
                             logger.info(f"  [{product_id}] Type assigned. Attempting to move to collection '{TARGET_COLLECTION_NAME}'...")
                             moved_to_target = move_product_to_pinterest_collection(product_id, from_collection_id=SOURCE_COLLECTION_ID)
                             if moved_to_target:
                                 logger.info(f"  [{product_id}] ✅ Successfully moved product to '{TARGET_COLLECTION_NAME}'.")
-                                # 3. Remove from Source Collection (ALWAYS RUN, EVEN IF NOT MOVED)
-                                removed_from_source = platform_api_remove_product_from_collection(product_id, SOURCE_COLLECTION_ID)
-                                if removed_from_source:
-                                    logger.info(f"  [{product_id}] ✅ Removed product from source collection '{SOURCE_COLLECTION_ID}'.")
-                                else:
-                                    logger.error(f"  [{product_id}] ❌ Failed to remove product from source collection '{SOURCE_COLLECTION_ID}'.")
+                                successful_moves += 1
                             else:
                                 logger.error(f"  [{product_id}] ❌ Failed to move to '{TARGET_COLLECTION_NAME}'. Removal skipped.")
+                        
+                            # 3. Remove from Source Collection (ALWAYS attempt, even if move fails)
+                            removed_from_source = platform_api_remove_product_from_collection(product_id, SOURCE_COLLECTION_ID)
+                            if removed_from_source:
+                                logger.info(f"  [{product_id}] ✅ Removed product from source collection '{SOURCE_COLLECTION_ID}'.")
+                                successful_removals += 1
+                            else:
+                                logger.error(f"  [{product_id}] ❌ Failed to remove product from source collection '{SOURCE_COLLECTION_ID}'.")
 
                 else: # Main product update failed
                     logger.error(f"❌ Error updating product {product_id} via REST: {update_resp.status_code} {update_resp.text}")
@@ -2067,14 +2076,27 @@ def translate_collection_fields():
             translation_progress["completed"] = processed_count
             translation_progress["errors"] = error_count
 
-        # --- Loop finished ---
-        final_message = f"Translation process completed for collection. Products processed: {processed_count}/{len(products)}. Successful updates: {successful_updates}. Errors encountered: {error_count}."
+        final_message = (
+            f"Translation process completed for collection. "
+            f"Products processed: {processed_count}/{len(products)}. "
+            f"Successful updates: {successful_updates}. "
+            f"Type assignments: {successful_type_assignments}. "
+            f"Moves: {successful_moves}. "
+            f"Removals: {successful_removals}. "
+            f"Errors encountered: {error_count}."
+        )
         logger.info(final_message)
-        return jsonify({"success": True, "message": final_message, "processed_count": processed_count, "error_count": error_count, "successful_updates": successful_updates})
-    except Exception as e:
-        logger.exception("❌ Unhandled error in translate_collection_fields:")
-        translation_progress["total"] = 0; translation_progress["completed"] = 0; translation_progress["errors"] = 0 # Reset progress
-        return jsonify({"error": f"💥 An unexpected server error occurred: {str(e)}"}), 500
+        return jsonify({
+            "success": True,
+            "message": final_message,
+            "processed_count": processed_count,
+            "error_count": error_count,
+            "successful_updates": successful_updates,
+            "successful_type_assignments": successful_type_assignments,
+            "successful_moves": successful_moves,
+            "successful_removals": successful_removals
+        })
+
 
 # --- Don't forget to include the modified post_process_description function definition above this route ---
 # --- Ensure extract_name_from_title, slugify, clean_title_output and all translation functions are defined/imported ---
