@@ -2033,50 +2033,22 @@ def translate_collection_fields():
                              logger.error(f"  [{product_id}] ❌ Failed to assign AI type '{determined_type}' after successful update.")
 
                         # --- Move Product to Target Collection (Conditional on Type Assignment) ---
-                        if type_assigned: # Only proceed if type assignment was successful
-                            logger.info(f"  [{product_id}] Type assigned. Attempting to move to collection '{TARGET_COLLECTION_NAME}'...")
-                            # RENAME 'moved' to 'moved_to_target' for clarity
-                            moved_to_target = move_product_to_pinterest_collection(product_id)
-
-                            if moved_to_target: # Check if move to target collection succeeded
-                                logger.info(f"  [{product_id}] ✅ Successfully moved product to '{TARGET_COLLECTION_NAME}'.")
-
-                                # <<< === ADD THIS REMOVAL BLOCK === >>>
-                                # 3. Remove from Source Collection
-                                removed_from_source = False
-                                # Get the configured source ID (ensure it's loaded/available)
-                                current_source_id = None
-                                try:
-                                    # Assumes SOURCE_COLLECTION_ID is imported or loaded via os.getenv
-                                    # If loaded via os.getenv ensure it's done before this loop starts
-                                    source_id_env = os.getenv("SOURCE_COLLECTION_ID") # Re-check env or use imported constant
-                                    if source_id_env:
-                                        current_source_id = int(source_id_env)
-                                except (ValueError, TypeError):
-                                    logger.error(f"[{product_id}] Invalid SOURCE_COLLECTION_ID configured.")
-
-                                if current_source_id: # Check if source ID is valid
-                                    logger.info(f"  [{product_id}] Attempting removal from source collection '{SOURCE_COLLECTION_NAME}' (ID: {current_source_id})...")
-                                    # Call the imported removal function
-                                    # Make sure platform_api_remove_product_from_collection is imported
-                                    removed_from_source = platform_api_remove_product_from_collection(product_id, current_source_id)
-                                    if not removed_from_source:
-                                         logger.error(f"  [{product_id}] ❌ Failed removal from source collection {current_source_id}.")
-                                    else:
-                                         logger.info(f"  [{product_id}] ✅ Removal from source collection {current_source_id} status: {removed_from_source}")
-                                else:
-                                    logger.warning(f"  [{product_id}] Skipping removal from source: SOURCE_COLLECTION_ID not configured or invalid.")
-                                # <<< === END OF ADDED REMOVAL BLOCK === >>>
-
-                            else: # Move to target failed
-                                logger.error(f"  [{product_id}] ❌ Failed to move product to '{TARGET_COLLECTION_NAME}' after type assignment.")
-                                # Decide if this failure should increment the main error_count
-                        else: # Type assignment failed
+                        if type_assigned:
+                            logger.info(f"  [{product_id}] Type assigned. Moving to collection '{TARGET_COLLECTION_NAME}' and removing from source if present...")
+                        
+                            moved_to_target = move_product_to_pinterest_collection(
+                                product_id,
+                                from_collection_id=SOURCE_COLLECTION_ID
+                            )
+                        
+                            if moved_to_target:
+                                logger.info(f"  [{product_id}] ✅ Moved to '{TARGET_COLLECTION_NAME}' and removed from '{SOURCE_COLLECTION_NAME}' if present.")
+                            else:
+                                logger.error(f"  [{product_id}] ❌ Failed to move to '{TARGET_COLLECTION_NAME}'.")
+                        
+                        else:
                             logger.warning(f"  [{product_id}] Skipping move and removal because type assignment failed.")
-                    else: # AI type determination failed
-                        # This case occurs if AI failed to determine a valid type earlier
-                        logger.warning(f"  [{product_id}] Skipping type assignment, move, and removal because AI did not determine a valid type.")
-                    # No more code should be inside the 'if determined_type:' block after this point
+
 
                 else: # Main product update failed
                     logger.error(f"❌ Error updating product {product_id} via REST: {update_resp.status_code} {update_resp.text}")
