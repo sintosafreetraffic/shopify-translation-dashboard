@@ -2097,6 +2097,10 @@ def translate_collection_fields():
             "successful_moves": successful_moves,
             "successful_removals": successful_removals
         })
+    except Exception as e:
+        logger.exception(f"❌ Uncaught error in translate_collection_fields: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
 
 
 # --- Don't forget to include the modified post_process_description function definition above this route ---
